@@ -428,7 +428,7 @@ const App = () => {
                           <div className={`text-xl font-black text-white italic`}>{guru.data.pick.symbol}</div>
                           <div className="flex-1">
                             <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-0.5">Top Pick</div>
-                            <p className="text-[10px] font-bold text-slate-400 leading-tight line-clamp-2">
+                            <p className="text-[10px] font-bold text-slate-400 leading-normal">
                               {guru.data.pick.reason}
                             </p>
                           </div>
