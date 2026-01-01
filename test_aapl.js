@@ -1,4 +1,4 @@
-const apiKey = "AIzaSyDFX5ltfAsyWBi1Rfc2FZR7IQh4zAPtkrg";
+
 const symbols = "AAPL";
 const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
