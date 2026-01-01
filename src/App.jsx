@@ -124,8 +124,12 @@ const App = () => {
   };
 
   const fetchMarketData = async () => {
-    if (!apiKey) {
-      setError("Gemini API 키가 설정되지 않았습니다.");
+    // 환경 변수를 여러 경로에서 시도합니다.
+    const currentApiKey = apiKey || import.meta.env.VITE_GEMINI_API_KEY;
+
+    if (!currentApiKey) {
+      setError("Gemini API 키가 시스템에 설정되지 않았습니다. Vercel 환경 변수 설정을 확인해 주세요.");
+      setLoading(false);
       return;
     }
     if (assets.length === 0) return;
@@ -134,7 +138,7 @@ const App = () => {
     try {
       const symbols = assets.map(a => a.symbol).join(', ');
       const currentDate = new Date().toISOString().split('T')[0];
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${currentApiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
