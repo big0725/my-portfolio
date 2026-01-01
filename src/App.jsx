@@ -381,18 +381,18 @@ const App = () => {
               icon: <Sparkles className="text-fuchsia-400" size={16} />
             }
           ].map((guru, i) => (
-            <div key={i} className={`glass - card p - 6 border - ${guru.color} - 500 / 10 group hover: border - ${guru.color} - 500 / 30 transition - all duration - 500 flex flex - col h - full`}>
+            <div key={i} className={`glass-card p-6 border-${guru.color}-500/10 group hover:border-${guru.color}-500/30 transition-all duration-500 flex flex-col h-full`}>
               <div className="flex items-center gap-4 mb-4">
                 <div className="relative">
-                  <div className={`absolute - inset - 1 bg - gradient - to - tr from - ${guru.color} - 500 to - transparent rounded - full opacity - 20 group - hover: opacity - 40 transition - opacity`}></div>
+                  <div className={`absolute -inset-1 bg-gradient-to-tr from-${guru.color}-500 to-transparent rounded-full opacity-20 group-hover:opacity-40 transition-opacity`}></div>
                   <img src={guru.image} alt={guru.name} className="w-12 h-12 rounded-full object-cover border-2 border-white/10 relative z-10" />
-                  <div className={`absolute - bottom - 1 - right - 1 bg - [#1e293b] p - 1 rounded - full border border - white / 5 z - 20`}>
+                  <div className={`absolute -bottom-1 -right-1 bg-[#1e293b] p-1 rounded-full border border-white/5 z-20`}>
                     {guru.icon}
                   </div>
                 </div>
                 <div>
                   <h3 className="text-sm font-black text-white">{guru.name}</h3>
-                  <p className={`text - [9px] font - bold text - ${guru.color} - 400 uppercase tracking - widest`}>{guru.role}</p>
+                  <p className={`text-[9px] font-bold text-${guru.color}-400 uppercase tracking-widest`}>{guru.role}</p>
                 </div>
               </div>
 
@@ -409,10 +409,10 @@ const App = () => {
                       "{aiInsights?.error ? "잠시 분석이 중단되었습니다. 새로고침을 해보세요." : (guru.data?.advice || "시장을 분석하고 있습니다...")}"
                     </p>
                     {guru.data?.action && (
-                      <div className={`mt - 4 p - 3 rounded - xl bg - ${guru.color} - 500 / 5 border border - ${guru.color} - 500 / 10`}>
+                      <div className={`mt-4 p-3 rounded-xl bg-${guru.color}-500/5 border border-${guru.color}-500/10`}>
                         <div className="flex items-center gap-2 mb-1">
-                          <CheckCircle size={10} className={`text - ${guru.color} - 400`} />
-                          <span className={`text - [10px] font - black text - ${guru.color} - 400 uppercase tracking - tighter`}>Action Plan</span>
+                          <CheckCircle size={10} className={`text-${guru.color}-400`} />
+                          <span className={`text-[10px] font-black text-${guru.color}-400 uppercase tracking-tighter`}>Action Plan</span>
                         </div>
                         <p className="text-[11px] font-black text-white leading-snug">
                           {guru.data.action}
@@ -420,12 +420,12 @@ const App = () => {
                       </div>
                     )}
                     {guru.data?.pick && (
-                      <div className={`mt - 3 p - 3 rounded - xl bg - white / 5 border border - white / 5 relative overflow - hidden group / pick`}>
-                        <div className={`absolute top - 0 right - 0 p - 1 bg - ${guru.color} - 500 / 10 rounded - bl - lg`}>
-                          <Sparkles size={8} className={`text - ${guru.color} - 400`} />
+                      <div className={`mt-3 p-3 rounded-xl bg-white/5 border border-white/5 relative overflow-hidden group/pick`}>
+                        <div className={`absolute top-0 right-0 p-1 bg-${guru.color}-500/10 rounded-bl-lg`}>
+                          <Sparkles size={8} className={`text-${guru.color}-400`} />
                         </div>
                         <div className="flex items-start gap-3">
-                          <div className={`text - xl font - black text - white italic`}>{guru.data.pick.symbol}</div>
+                          <div className={`text-xl font-black text-white italic`}>{guru.data.pick.symbol}</div>
                           <div className="flex-1">
                             <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-0.5">Top Pick</div>
                             <p className="text-[10px] font-bold text-slate-400 leading-tight line-clamp-2">
@@ -456,7 +456,7 @@ const App = () => {
                 ${stats.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}
               </div>
               <div className="flex items-center gap-3">
-                <div className={`flex items - center gap - 1 px - 3 py - 1 rounded - full text - xs font - black ${stats.profit >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-black ${stats.profit >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
                   {stats.profit >= 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
                   {stats.profit >= 0 ? '+' : ''}{Math.abs(stats.profit).toLocaleString()} ({stats.margin.toFixed(2)}%)
                 </div>
@@ -503,7 +503,7 @@ const App = () => {
                   <div key={i} className="flex items-center justify-between">
                     <span className="text-sm font-bold text-slate-400">{d.name}</span>
                     <div className="flex-1 mx-4 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                      <div className="h-full bg-indigo-500" style={{ width: `${stats.total > 0 ? (d.value / stats.total) * 100 : 0} % ` }}></div>
+                      <div className="h-full bg-indigo-500" style={{ width: `${stats.total > 0 ? (d.value / stats.total) * 100 : 0}%` }}></div>
                     </div>
                     <span className="text-sm font-black text-white">{stats.total > 0 ? ((d.value / stats.total) * 100).toFixed(1) : 0}%</span>
                   </div>
@@ -543,7 +543,7 @@ const App = () => {
                     <tr key={a.id} className="hover:bg-white/5 transition-colors group">
                       <td className="px-8 py-5 font-black text-white text-lg">
                         <div className="flex items-center gap-3">
-                          <div className={`w - 8 h - 8 rounded - full flex items - center justify - center text - xs font - bold ${profit >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${profit >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
                             {a.symbol[0]}
                           </div>
                           {a.symbol}
@@ -553,11 +553,11 @@ const App = () => {
                       <td className="px-8 py-5 text-slate-500 font-medium">${a.buyPrice.toLocaleString()}</td>
                       <td className="px-8 py-5 font-black text-white">${currentPrice.toLocaleString()}</td>
                       <td className="px-8 py-5">
-                        <div className={`flex flex - col`}>
-                          <span className={`font - black text - sm ${profit >= 0 ? 'text-emerald-400' : 'text-rose-400'} `}>
+                        <div className={`flex flex-col`}>
+                          <span className={`font-black text-sm ${profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                             {profit >= 0 ? '+' : '-'}${Math.abs(profit).toLocaleString()}
                           </span>
-                          <span className={`text - [10px] font - bold ${profit >= 0 ? 'text-emerald-500/50' : 'text-rose-500/50'} `}>
+                          <span className={`text-[10px] font-bold ${profit >= 0 ? 'text-emerald-500/50' : 'text-rose-500/50'}`}>
                             ({pPercent.toFixed(2)}%)
                           </span>
                         </div>
