@@ -51,7 +51,10 @@ try {
   console.error("Firebase 초기화 에러:", e);
 }
 
-const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+// API 키 가져오기 헬퍼 (보안을 위해 환경 변수만 사용)
+const getApiKey = () => {
+  return import.meta.env.VITE_GEMINI_API_KEY;
+};
 
 const App = () => {
   const [user, setUser] = useState(null);
@@ -124,11 +127,10 @@ const App = () => {
   };
 
   const fetchMarketData = async () => {
-    // 환경 변수를 여러 경로에서 시도합니다.
-    const currentApiKey = apiKey || import.meta.env.VITE_GEMINI_API_KEY;
+    const currentApiKey = getApiKey();
 
     if (!currentApiKey) {
-      setError("Gemini API 키가 시스템에 설정되지 않았습니다. Vercel 환경 변수 설정을 확인해 주세요.");
+      setError("Gemini API 키가 설정되지 않았습니다. 관리자 설정을 확인해주세요.");
       setLoading(false);
       return;
     }
@@ -190,7 +192,8 @@ const App = () => {
   };
 
   const fetchAiInsights = async (symbols, currentPrices) => {
-    if (!apiKey || !assets.length) return;
+    const currentApiKey = getApiKey();
+    if (!currentApiKey || !assets.length) return;
     setIsAiLoading(true);
     try {
       const portfolioSummary = assets.map(a => `${a.symbol}: ${a.quantity} shares (at $${currentPrices[a.symbol] || 'unknown'})`).join(', ');
