@@ -196,31 +196,36 @@ const App = () => {
     if (!currentApiKey || !assets.length) return;
     setIsAiLoading(true);
     try {
-      const portfolioSummary = assets.map(a => `${a.symbol}: ${a.quantity} shares (at $${currentPrices[a.symbol] || 'unknown'})`).join(', ');
+      const portfolioSummary = assets.map(a => `${a.symbol}: ${a.quantity}주 (보유단가: $${a.buyPrice || 'unknown'})`).join(', ');
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${currentApiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{
             parts: [{
               text: `당신은 세계적인 투자 거장 3인(워렌 버핏, 스탠리 드러켄밀러, 캐시 우드)입니다. 다음 포트폴리오를 분석해주세요: [${portfolioSummary}].
-              현재 시장 상황을 검색(Search)하여 각 인물의 철학에 따른 분석과 구체적인 행동 지침, 그리고 현재 시점에서 새롭게 매수를 추천하는 '최애 종목' 하나를 제안해주세요.
+              구글 검색(Google Search)을 사용하여 현재 시장 상황을 반영한 각 인물의 철학에 따른 분석과 구체적인 행동 지침, 그리고 현재 시점에서 새롭게 매수를 추천하는 '최애 종목' 하나를 제안해주세요.
               
               반드시 다음 JSON 구조로만 응답하세요 (Markdown 블록 없이 스트링만):
               {
-                "buffett": { "advice": "분석 조언", "action": "보유 자산 행동 지침", "pick": { "symbol": "TICKER", "reason": "추천 이유(짧게)" } },
-                "druckenmiller": { "advice": "분석 조언", "action": "보유 자산 행동 지침", "pick": { "symbol": "TICKER", "reason": "추천 이유(짧게)" } },
-                "cathie": { "advice": "분석 조언", "action": "보유 자산 행동 지침", "pick": { "symbol": "TICKER", "reason": "추천 이유(짧게)" } }
+                "buffett": { "advice": "조언", "action": "지침", "pick": { "symbol": "TICKER", "reason": "이유" } },
+                "druckenmiller": { "advice": "조언", "action": "지침", "pick": { "symbol": "TICKER", "reason": "이유" } },
+                "cathie": { "advice": "조언", "action": "지침", "pick": { "symbol": "TICKER", "reason": "이유" } }
               }`
             }]
           }],
-          generationConfig: { response_mime_type: "application/json" }
+          tools: [{ google_search: {} }]
         })
       });
       const resData = await response.json();
-      const content = JSON.parse(resData.candidates[0].content.parts[0].text);
-      setAiInsights(content);
+      if (resData.error) throw new Error(resData.error.message);
+
+      const textResponse = resData.candidates[0].content.parts[0].text;
+      const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        setAiInsights(JSON.parse(jsonMatch[0]));
+      }
     } catch (e) {
       console.error("AI Insight 생성 실패:", e);
     } finally {
