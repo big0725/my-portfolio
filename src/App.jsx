@@ -163,11 +163,20 @@ const App = () => {
       if (resData.error) throw new Error(resData.error.message);
 
       let textResponse = resData.candidates[0].content.parts[0].text;
-      // 마크다운 코드 블록이 포함되어 있을 경우 추출
-      const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("JSON 응답을 찾을 수 없습니다.");
 
-      const content = JSON.parse(jsonMatch[0]);
+      // 마크다운 코드 블록(```json ... ```) 제거 및 순수 JSON 영역만 추출
+      let jsonStr = textResponse;
+      const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[0];
+      } else {
+        throw new Error("API 응답에서 데이터 형식을 찾을 수 없습니다.");
+      }
+
+      // 간혹 포함될 수 있는 보이지 않는 제어 문자나 마크다운 잔재 제거
+      jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
+
+      const content = JSON.parse(jsonStr);
       if (content.currentPrices) {
         const normalizedPrices = {};
         // 티커 대소문자 무관하게 매칭하기 위해 모든 키를 대문자로 변환
