@@ -180,15 +180,8 @@ const App = () => {
       // 2. 현재가 및 히스토리 취합을 위한 병렬 호출 (개별 실패 처리)
       const fetchHistory = async (symbol) => {
         try {
-          let range = '7d';
-          let interval = '1d';
-          if (chartRange === '30d') {
-            range = '1mo';
-            interval = '1d';
-          } else if (chartRange === '1y') {
-            range = '1y';
-            interval = '1wk';
-          }
+          const range = '1y';
+          const interval = '1d';
 
           const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`)}`;
           const res = await fetch(proxyUrl);
@@ -416,8 +409,27 @@ const App = () => {
     const dailyChange = yesterdayValue ? total - yesterdayValue : 0;
     const dailyChangePercent = yesterdayValue ? (dailyChange / yesterdayValue) * 100 : 0;
 
-    return { total, profit: total - cost, margin: cost > 0 ? ((total - cost) / cost) * 100 : 0, dist, dailyChange, dailyChangePercent };
-  }, [assets, prices, snapshots, prevPrices]);
+    // 기간별 P&L 추정 계산 (7d, 30d, 1y)
+    const getPeriodStats = (days) => {
+      if (!history || history.length === 0) return null;
+      const targetIdx = Math.max(0, history.length - 1 - days);
+      const pastData = history[targetIdx];
+      let pastValue = 0;
+      assets.forEach(a => {
+        const sym = a.symbol.toUpperCase();
+        pastValue += a.quantity * (pastData[sym] || prices[sym] || a.buyPrice);
+      });
+      const change = total - pastValue;
+      const percent = pastValue > 0 ? (change / pastValue) * 100 : 0;
+      return { change, percent };
+    };
+
+    const pnl7d = getPeriodStats(7);
+    const pnl30d = getPeriodStats(30);
+    const pnl1y = getPeriodStats(history.length - 1);
+
+    return { total, profit: total - cost, margin: cost > 0 ? ((total - cost) / cost) * 100 : 0, dist, dailyChange, dailyChangePercent, pnl7d, pnl30d, pnl1y };
+  }, [assets, prices, snapshots, prevPrices, history]);
 
   // 가격 정보가 업데이트되어 총 가치가 계산되면 관리자인 경우 자동으로 스냅샷 저장
   useEffect(() => {
@@ -435,10 +447,14 @@ const App = () => {
       }));
     }
 
-    // 스냅샷이 없으면 Gemini 기반 추정치(7일)를 가공해서 보여줍니다.
+    // 스냅샷이 없으면 시장 히스토리 데이터를 가공해서 보여줍니다.
     if (!history || !history.length) return [];
 
-    return history.map(d => {
+    let filteredHistory = history;
+    if (chartRange === '7d') filteredHistory = history.slice(-7);
+    else if (chartRange === '30d') filteredHistory = history.slice(-30);
+
+    return filteredHistory.map(d => {
       let v = 0;
       assets.forEach(a => {
         const symbol = a.symbol.toUpperCase();
@@ -476,7 +492,7 @@ const App = () => {
       <div className="max-w-[1550px] mx-auto p-4 md:p-10 space-y-10 relative z-10">
 
         {/* Top Navigation */}
-        <nav className="flex justify-between items-center glass-card p-4 px-8 border-b border-white/5">
+        <nav className="flex justify-between items-center glass-card p-4 px-4 md:px-8 border-b border-white/5">
           <div className="flex items-center gap-3">
             <div className="bg-indigo-600 p-2 rounded-xl shadow-lg shadow-indigo-500/30">
               <Briefcase className="text-white" size={24} />
@@ -529,21 +545,34 @@ const App = () => {
           <div className="lg:col-span-2 glass-card p-0 relative overflow-hidden group border-white/5 shadow-[0_32px_64px_-16px_rgba(0,0,0,0.5)] bg-white/[0.01]">
             <div className="absolute top-0 right-0 -mr-20 -mt-20 w-80 h-80 bg-indigo-600/5 rounded-full blur-[100px] group-hover:bg-indigo-600/10 transition-all duration-1000"></div>
 
-            <div className="relative z-10 flex flex-col md:flex-row min-h-[820px]">
+            <div className="relative z-10 flex flex-col md:flex-row min-h-0 md:min-h-[820px]">
               {/* Left Side: Performance Metrics */}
-              <div className="md:w-[340px] p-12 border-r border-white/5 flex flex-col space-y-10 bg-white/[0.01]">
+              <div className="md:w-[340px] p-6 md:p-12 border-b md:border-b-0 md:border-r border-white/5 flex flex-col space-y-8 md:space-y-10 bg-white/[0.01]">
                 <div className="space-y-3">
                   <div className="text-slate-500 text-[10px] font-black uppercase tracking-[0.3em] flex items-center gap-2 opacity-70">
                     <Wallet size={12} className="text-indigo-400" /> Total Balance
                   </div>
-                  <div className="text-6xl font-black text-white tracking-tighter leading-none transition-all group-hover:tracking-tight drop-shadow-2xl">
+                  <div className="text-4xl md:text-6xl font-black text-white tracking-tighter leading-none transition-all group-hover:tracking-tight drop-shadow-2xl">
                     ${stats.total.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                   </div>
-                  <div className="flex items-center gap-2 mt-4">
+                  <div className="flex flex-wrap gap-2 mt-4">
                     <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-black shadow-lg ${stats.dailyChange >= 0 ? 'bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20' : 'bg-rose-500/10 text-rose-400 ring-1 ring-rose-500/20'}`}>
                       {stats.dailyChange >= 0 ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
                       {stats.dailyChangePercent >= 0 ? '+' : ''}{stats.dailyChangePercent.toFixed(2)}% Today
                     </div>
+
+                    {[
+                      { label: '7D', data: stats.pnl7d },
+                      { label: '30D', data: stats.pnl30d },
+                      { label: '1Y', data: stats.pnl1y }
+                    ].map((item, idx) => (
+                      item.data && (
+                        <div key={idx} className={`flex items-center gap-1 px-3 py-1.5 rounded-xl text-[9px] font-black border ${item.data.change >= 0 ? 'bg-emerald-500/5 text-emerald-400/60 border-emerald-500/10' : 'bg-rose-500/5 text-rose-400/60 border-rose-500/10'}`}>
+                          <span className="opacity-40 uppercase mr-1">{item.label}</span>
+                          {item.data.percent >= 0 ? '+' : ''}{item.data.percent.toFixed(1)}%
+                        </div>
+                      )
+                    ))}
                   </div>
                 </div>
 
@@ -571,26 +600,28 @@ const App = () => {
               {/* Right Side: Chart (Top) + Guru Insights (Bottom) */}
               <div className="flex-1 flex flex-col overflow-hidden bg-white/[0.005]">
                 {/* Chart Section */}
-                <div className="p-10 border-b border-white/5 h-[280px] flex flex-col relative overflow-hidden">
+                <div className="p-6 md:p-10 border-b border-white/5 h-auto md:h-[280px] flex flex-col relative overflow-hidden">
                   <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-indigo-500/20 to-transparent"></div>
                   <div className="flex items-center justify-between mb-8">
                     <div className="flex flex-col">
                       <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] flex items-center gap-2 mb-2">
                         <ChartIcon size={12} className="text-indigo-400" /> Market Trajectory
                       </div>
-                      <div className="flex items-center gap-2 bg-black/20 p-1 rounded-xl w-fit border border-white/5">
-                        {['7d', '30d', '1y'].map(range => (
-                          <button
-                            key={range}
-                            onClick={() => setChartRange(range)}
-                            className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${chartRange === range ? 'bg-indigo-600 text-white shadow-xl translate-y-[-1px]' : 'text-slate-500 hover:text-slate-300'}`}
-                          >
-                            {range === '1y' ? '1YR' : range === '30d' ? '30D' : '7D'}
-                          </button>
-                        ))}
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center bg-black/5 sm:bg-black/20 p-1 rounded-xl w-full sm:w-fit border border-white/5">
+                        <div className="flex items-center gap-1">
+                          {['7d', '30d', '1y'].map(range => (
+                            <button
+                              key={range}
+                              onClick={() => setChartRange(range)}
+                              className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-widest transition-all ${chartRange === range ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-500 hover:text-slate-300'}`}
+                            >
+                              {range === '1y' ? '1YR' : range === '30d' ? '30D' : '7D'}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-3 bg-indigo-500/5 px-4 py-2 rounded-2xl border border-indigo-500/10 shrink-0">
+                    <div className="flex items-center gap-3 bg-indigo-500/5 px-4 py-2 rounded-2xl border border-indigo-500/10 shrink-0 self-start sm:self-auto mt-4 sm:mt-0">
                       <div className="flex gap-1">
                         <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,1)] animate-ping"></span>
                         <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 absolute shadow-[0_0_10px_rgba(99,102,241,1)]"></span>
@@ -639,7 +670,7 @@ const App = () => {
                 </div>
 
                 {/* Guru Insights Section */}
-                <div className="p-10 flex flex-col flex-1 relative overflow-hidden group/guru bg-black/5">
+                <div className="p-6 md:p-10 flex flex-col flex-1 relative overflow-hidden group/guru bg-black/5">
                   <div className="flex items-center justify-between mb-8">
                     <div className="flex items-center gap-4">
                       <div className="bg-indigo-600/10 p-2.5 rounded-2xl border border-indigo-500/10 shadow-lg shadow-indigo-500/5">
@@ -664,7 +695,7 @@ const App = () => {
                     </div>
                   </div>
 
-                  <div className="relative flex-1 min-h-[400px]">
+                  <div className="relative flex-1 min-h-[460px] md:min-h-[400px]">
                     {[
                       {
                         name: "WARREN BUFFETT",
@@ -693,7 +724,7 @@ const App = () => {
                     ].map((guru, i) => (
                       <div
                         key={i}
-                        className={`absolute inset-0 transition-all duration-500 ease-out transform ${guruIndex === i ? 'opacity-100 translate-x-0 scale-100' : 'opacity-0 translate-x-8 scale-95 pointer-events-none'
+                        className={`absolute inset-0 transition-all duration-500 ease-out transform bg-[#020617]/40 backdrop-blur-sm ${guruIndex === i ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-8 scale-95 pointer-events-none'
                           }`}
                       >
                         <div className="flex flex-col xl:flex-row gap-8 items-start h-full">
@@ -742,7 +773,7 @@ const App = () => {
 
           {/* Quick Stats / AI Insights Placeholder */}
           <div className="space-y-6">
-            <div className="glass-card p-10 border-white/5 bg-indigo-500/[0.03] group hover:bg-indigo-500/[0.06] transition-all relative overflow-hidden flex flex-col justify-center min-h-[200px] shadow-2xl shadow-indigo-500/5">
+            <div className="glass-card p-6 md:p-10 border-white/5 bg-indigo-500/[0.03] group hover:bg-indigo-500/[0.06] transition-all relative overflow-hidden flex flex-col justify-center min-h-[200px] shadow-2xl shadow-indigo-500/5">
               <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full blur-3xl -mr-16 -mt-16"></div>
               <div className="flex items-center justify-between mb-6 relative z-10">
                 <div className="bg-indigo-600/20 p-3 rounded-2xl border border-indigo-500/20">
@@ -755,7 +786,7 @@ const App = () => {
               </p>
             </div>
 
-            <div className="glass-card p-10 flex flex-col h-full overflow-hidden bg-white/[0.01] border-white/5 shadow-2xl">
+            <div className="glass-card p-6 md:p-10 flex flex-col h-full overflow-hidden bg-white/[0.01] border-white/5 shadow-2xl">
               <div className="flex items-center justify-between mb-10">
                 <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-3">
                   <PieIcon size={14} className="text-indigo-400" /> Asset Distribution
@@ -863,12 +894,12 @@ const App = () => {
                 <table className="w-full text-left border-separate border-spacing-0">
                   <thead>
                     <tr className="bg-white/[0.01] text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] border-b border-white/5">
-                      <th className="px-10 py-6 font-black opacity-60">Asset / Ticker</th>
-                      <th className="px-10 py-6 font-black opacity-60">Quantity</th>
-                      <th className="px-10 py-6 font-black opacity-60">Avg Cost</th>
-                      <th className="px-10 py-6 font-black opacity-60">Market Price</th>
-                      <th className="px-10 py-6 text-right font-black opacity-60">PnL (Real-time)</th>
-                      {isAdmin && <th className="px-10 py-6 text-right w-20"></th>}
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Asset</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Qty</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60 hidden sm:table-cell">Avg Cost</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Price</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 text-right font-black opacity-60">PnL</th>
+                      {isAdmin && <th className="px-4 md:px-10 py-4 md:py-6 text-right w-20"></th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.03]">
@@ -879,54 +910,36 @@ const App = () => {
 
                       return (
                         <tr key={a.id} className="hover:bg-white/[0.03] transition-all duration-300 group/row">
-                          <td className="px-10 py-8">
-                            <div className="flex items-center gap-5">
-                              <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-sm font-black ring-1 ring-white/10 shadow-2xl transition-all group-hover/row:scale-105 ${profit >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                          <td className="px-2 md:px-10 py-4 md:py-8">
+                            <div className="flex items-center gap-2 md:gap-5">
+                              <div className={`w-8 h-8 md:w-14 md:h-14 rounded-lg md:rounded-2xl flex items-center justify-center text-[10px] md:text-sm font-black ring-1 ring-white/10 shadow-2xl transition-all group-hover/row:scale-105 ${profit >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
                                 {a.symbol[0]}
-                                <div className={`absolute -inset-1 blur-md opacity-0 group-hover/row:opacity-20 transition-opacity ${profit >= 0 ? 'bg-emerald-500' : 'bg-rose-500'}`}></div>
                               </div>
-                              <div className="flex flex-col gap-1">
-                                <span className="font-black text-white text-lg tracking-tight group-hover/row:text-indigo-400 transition-colors uppercase">{a.symbol}</span>
-                                <span className="text-[9px] font-black text-slate-600 uppercase tracking-widest">Digital Asset Layer</span>
+                              <div className="flex flex-col">
+                                <span className="font-black text-white text-[11px] md:text-lg tracking-tight uppercase">{a.symbol}</span>
                               </div>
                             </div>
                           </td>
-                          <td className="px-10 py-8">
-                            <div className="flex flex-col">
-                              <span className="text-sm font-black text-slate-300 tabular-nums">{a.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
-                              <span className="text-[9px] font-bold text-slate-600 uppercase tracking-tighter">Units held</span>
-                            </div>
+                          <td className="px-2 md:px-10 py-4 md:py-8">
+                            <span className="text-[10px] md:text-sm font-black text-slate-300 tabular-nums">{a.quantity.toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>
                           </td>
-                          <td className="px-10 py-8 text-sm text-slate-500 font-bold tabular-nums">
+                          <td className="px-4 md:px-10 py-6 md:py-8 text-xs md:text-sm text-slate-500 font-bold tabular-nums hidden sm:table-cell">
                             <span className="opacity-40">$</span>{a.buyPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                           </td>
-                          <td className="px-10 py-8">
-                            <div className="flex flex-col">
-                              <span className="font-black text-white text-sm tabular-nums flex items-center gap-1.5">
-                                <span className="text-indigo-500/50 scale-90">$</span>
-                                {currentPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                              </span>
-                              <div className="flex items-center gap-1.5 mt-1">
-                                <span className="w-1 h-1 rounded-full bg-indigo-500 animate-pulse"></span>
-                                <span className="text-[9px] font-black text-indigo-500/40 uppercase tracking-widest">Live API</span>
-                              </div>
-                            </div>
+                          <td className="px-2 md:px-10 py-4 md:py-8">
+                            <span className="font-black text-white text-[10px] md:text-sm tabular-nums">
+                              ${currentPrice.toLocaleString(undefined, { maximumFractionDigits: 1 })}
+                            </span>
                           </td>
-                          <td className="px-10 py-8 text-right">
-                            <div className="flex flex-col items-end gap-1.5">
-                              <span className={`font-black text-lg tabular-nums ${profit >= 0 ? 'text-emerald-400 drop-shadow-[0_0_10px_rgba(52,211,153,0.3)]' : 'text-rose-400 drop-shadow-[0_0_10px_rgba(248,113,113,0.3)]'}`}>
-                                {profit >= 0 ? '+' : ''}<span className="text-sm opacity-60 mr-0.5">$</span>{profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                              </span>
-                              <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[10px] font-black ${profit >= 0 ? 'bg-emerald-500/10 text-emerald-500/60' : 'bg-rose-500/10 text-rose-500/60'}`}>
-                                {profit >= 0 ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-                                {pPercent.toFixed(2)}%
-                              </div>
-                            </div>
+                          <td className="px-2 md:px-10 py-4 md:py-8 text-right">
+                            <span className={`font-black text-[11px] md:text-lg tabular-nums ${profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {profit >= 0 ? '+' : ''}${profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            </span>
                           </td>
                           {isAdmin && (
-                            <td className="px-10 py-8 text-right">
-                              <button onClick={() => removeAsset(a.id)} className="text-slate-700 hover:text-rose-500 p-3 bg-white/5 rounded-2xl transition-all opacity-0 group-hover/row:opacity-100 hover:scale-110 active:scale-95 border border-white/5">
-                                <Trash2 size={16} />
+                            <td className="px-4 md:px-10 py-6 md:py-8 text-right">
+                              <button onClick={() => removeAsset(a.id)} className="text-slate-700 hover:text-rose-500 p-2 md:p-3 bg-white/5 rounded-2xl transition-all opacity-0 group-hover/row:opacity-100 hover:scale-110 active:scale-95 border border-white/5">
+                                <Trash2 size={14} />
                               </button>
                             </td>
                           )}
@@ -941,34 +954,34 @@ const App = () => {
                 <table className="w-full text-left border-separate border-spacing-0">
                   <thead>
                     <tr className="bg-white/[0.01] text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] border-b border-white/5">
-                      <th className="px-10 py-6 font-black opacity-60">Timestamp</th>
-                      <th className="px-10 py-6 font-black opacity-60">Type</th>
-                      <th className="px-10 py-6 font-black opacity-60">Ticker</th>
-                      <th className="px-10 py-6 font-black opacity-60">Quantity</th>
-                      <th className="px-10 py-6 text-right font-black opacity-60">Execution Price</th>
-                      {isAdmin && <th className="px-10 py-6 text-right w-20"></th>}
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Timestamp</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Type</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Ticker</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Quantity</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 text-right font-black opacity-60">Execution Price</th>
+                      {isAdmin && <th className="px-4 md:px-10 py-4 md:py-6 text-right w-20"></th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.03]">
                     {[...assets].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)).map(log => (
                       <tr key={log.id} className="hover:bg-white/[0.03] transition-all duration-300 group/row">
-                        <td className="px-10 py-8 text-[11px] font-bold text-slate-500 tabular-nums uppercase">
-                          {log.date ? new Date(log.date).toLocaleString('ko-KR', { dateStyle: 'medium', timeStyle: 'short' }) : '-'}
+                        <td className="px-4 md:px-10 py-6 md:py-8 text-[10px] md:text-[11px] font-bold text-slate-500 tabular-nums uppercase">
+                          {log.date ? new Date(log.date).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' }) : '-'}
                         </td>
-                        <td className="px-10 py-8">
-                          <span className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all group-hover/row:scale-105 inline-block ${log.type === 'sell' ? 'bg-rose-500/5 text-rose-400 border-rose-500/20' : 'bg-emerald-500/5 text-emerald-400 border-emerald-500/20'}`}>
-                            {log.type === 'sell' ? 'Sell Order' : 'Buy Order'}
+                        <td className="px-4 md:px-10 py-6 md:py-8">
+                          <span className={`px-3 py-1.5 md:px-4 md:py-2 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest border transition-all group-hover/row:scale-105 inline-block ${log.type === 'sell' ? 'bg-rose-500/5 text-rose-400 border-rose-500/20' : 'bg-emerald-500/5 text-emerald-400 border-emerald-500/20'}`}>
+                            {log.type === 'sell' ? 'Sell' : 'Buy'}
                           </span>
                         </td>
-                        <td className="px-10 py-8 text-sm font-black text-white">{log.symbol}</td>
-                        <td className="px-10 py-8 text-sm font-bold text-slate-400 tabular-nums">{log.quantity.toLocaleString()}</td>
-                        <td className="px-10 py-8 text-sm font-black text-slate-400 text-right tabular-nums">
+                        <td className="px-4 md:px-10 py-6 md:py-8 text-xs md:text-sm font-black text-white">{log.symbol}</td>
+                        <td className="px-4 md:px-10 py-6 md:py-8 text-xs md:text-sm font-bold text-slate-400 tabular-nums">{log.quantity.toLocaleString()}</td>
+                        <td className="px-4 md:px-10 py-6 md:py-8 text-xs md:text-sm font-black text-slate-400 text-right tabular-nums">
                           <span className="opacity-30 mr-1">$</span>{log.buyPrice.toLocaleString()}
                         </td>
                         {isAdmin && (
-                          <td className="px-10 py-8 text-right">
-                            <button onClick={() => removeAsset(log.id)} className="text-slate-700 hover:text-rose-500 p-3 bg-white/5 rounded-2xl transition-all opacity-0 group-hover/row:opacity-100 hover:scale-110 active:scale-95 border border-white/5">
-                              <Trash2 size={16} />
+                          <td className="px-4 md:px-10 py-6 md:py-8 text-right">
+                            <button onClick={() => removeAsset(log.id)} className="text-slate-700 hover:text-rose-500 p-2 md:p-3 bg-white/5 rounded-2xl transition-all opacity-0 group-hover/row:opacity-100 hover:scale-110 active:scale-95 border border-white/5">
+                              <Trash2 size={14} />
                             </button>
                           </td>
                         )}
@@ -992,20 +1005,20 @@ const App = () => {
             )}
 
             {isAdmin && (
-              <div className="p-10 bg-indigo-600/[0.03] border-t border-white/5">
-                <div className="flex items-center justify-between mb-8">
-                  <div className="flex bg-white/5 p-1 rounded-2xl backdrop-blur-md">
+              <div className="p-6 md:p-10 bg-indigo-600/[0.03] border-t border-white/5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-8 gap-6">
+                  <div className="flex bg-white/5 p-1 rounded-2xl backdrop-blur-md w-full sm:w-fit">
                     <button
                       onClick={() => setAdminTab('buy')}
-                      className={`px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${adminTab === 'buy' ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-500/40' : 'text-slate-500 hover:text-slate-300'}`}
+                      className={`flex-1 sm:flex-none px-4 md:px-6 py-2.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all ${adminTab === 'buy' ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-500/40' : 'text-slate-500 hover:text-slate-300'}`}
                     >
-                      (+) 매수 기록 추가
+                      (+) 매수
                     </button>
                     <button
                       onClick={() => setAdminTab('sell')}
-                      className={`px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${adminTab === 'sell' ? 'bg-rose-600 text-white shadow-xl shadow-rose-500/40' : 'text-slate-500 hover:text-slate-300'}`}
+                      className={`flex-1 sm:flex-none px-4 md:px-6 py-2.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all ${adminTab === 'sell' ? 'bg-rose-600 text-white shadow-xl shadow-rose-500/40' : 'text-slate-500 hover:text-slate-300'}`}
                     >
-                      (-) 매도 기록 추가
+                      (-) 매도
                     </button>
                   </div>
                   <div className="flex items-center gap-3">
@@ -1014,7 +1027,7 @@ const App = () => {
                   </div>
                 </div>
 
-                <form onSubmit={addAsset} className="grid grid-cols-1 md:grid-cols-4 gap-6 items-end">
+                <form onSubmit={addAsset} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 items-end">
                   <div className="space-y-2">
                     <label className="text-[9px] font-black text-slate-500 uppercase ml-2">티커 (Ticker)</label>
                     <div className="relative">
