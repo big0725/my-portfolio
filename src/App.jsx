@@ -881,7 +881,7 @@ const App = () => {
                     </div>
                   </div>
 
-                  <div className="relative flex-1 min-h-[500px]">
+                  <div className="relative flex-1 min-h-[450px] md:min-h-[500px]">
                     {[
                       {
                         name: "WARREN BUFFETT",
@@ -910,7 +910,9 @@ const App = () => {
                     ].map((guru, i) => (
                       <div
                         key={i}
-                        className={`absolute inset-0 transition-all duration-700 ease-in-out transform ${guruIndex === i ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'
+                        className={`transition-all duration-700 ease-in-out transform ${guruIndex === i
+                          ? 'relative opacity-100 translate-x-0 scale-100 pointer-events-auto'
+                          : 'absolute top-0 left-0 w-full opacity-0 translate-x-12 scale-95 pointer-events-none'
                           }`}
                       >
                         <div className="flex flex-col gap-8 h-full">
@@ -957,15 +959,15 @@ const App = () => {
                               )}
 
                               {guru.data?.pick && !isAiLoading && (
-                                <div className={`p-6 rounded-[2rem] bg-${guru.color}-500/[0.03] border border-${guru.color}-500/10 backdrop-blur-xl group/pick hover:bg-${guru.color}-500/05 transition-all duration-500`}>
-                                  <div className="flex items-center justify-between mb-4">
-                                    <div className="flex items-center gap-3">
-                                      <div className={`w-2 h-2 rounded-full bg-${guru.color}-500 animate-pulse`}></div>
-                                      <span className={`text-[10px] font-black text-${guru.color}-400 uppercase tracking-widest`}>Strategic Pick</span>
+                                <div className={`p-4 md:p-6 rounded-[1.5rem] md:rounded-[2rem] bg-${guru.color}-500/[0.03] border border-${guru.color}-500/10 backdrop-blur-xl group/pick hover:bg-${guru.color}-500/05 transition-all duration-500 mb-4`}>
+                                  <div className="flex items-center justify-between mb-3 md:mb-4">
+                                    <div className="flex items-center gap-2 md:gap-3">
+                                      <div className={`w-1.5 md:w-2 h-1.5 md:h-2 rounded-full bg-${guru.color}-500 animate-pulse`}></div>
+                                      <span className={`text-[9px] md:text-[10px] font-black text-${guru.color}-400 uppercase tracking-widest`}>Strategic Pick</span>
                                     </div>
-                                    <span className="text-xl font-black text-white tracking-[0.15em] drop-shadow-lg">{guru.data.pick.symbol}</span>
+                                    <span className="text-base md:text-xl font-black text-white tracking-[0.1em] md:tracking-[0.15em] drop-shadow-lg">{guru.data.pick.symbol}</span>
                                   </div>
-                                  <p className="text-[12px] font-medium text-slate-400 leading-relaxed pl-5 border-l-2 border-white/5 group-hover/pick:border-indigo-500/30 transition-colors">
+                                  <p className="text-[11px] md:text-[12px] font-medium text-slate-400 leading-relaxed pl-3 md:pl-5 border-l-2 border-white/5 group-hover/pick:border-indigo-500/30 transition-colors">
                                     {guru.data.pick.reason}
                                   </p>
                                 </div>
