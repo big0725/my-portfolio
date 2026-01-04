@@ -18,7 +18,7 @@ import {
   signInWithPopup,
   signOut
 } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, onSnapshot, initializeFirestore } from 'firebase/firestore';
 
 // 1. 보안 설정
 const ADMIN_EMAIL = "big0725@gmail.com";
@@ -42,7 +42,10 @@ let auth, db, googleProvider;
 try {
   const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
   auth = getAuth(app);
-  db = getFirestore(app);
+  // WebChannelConnection RPC 'Write' 에러 방지를 위해 Long Polling 강제 활성화
+  db = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+  });
   googleProvider = new GoogleAuthProvider();
 } catch (e) {
   console.error("Firebase 초기화 에러:", e);
@@ -56,13 +59,14 @@ const getApiKey = () => {
 const App = () => {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const isAdmin = user?.email === ADMIN_EMAIL;
+  const isAdmin = user?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
   const [adminTab, setAdminTab] = useState('buy'); // 'buy' or 'sell'
   const [dataTab, setDataTab] = useState('inventory'); // 'inventory' or 'log'
   const [assets, setAssets] = useState([]);
   const [newAsset, setNewAsset] = useState({ symbol: '', quantity: '', buyPrice: '' });
   const [prices, setPrices] = useState({});
   const [prevPrices, setPrevPrices] = useState({});
+  const [marketStates, setMarketStates] = useState({}); // 'REGULAR', 'CLOSED', etc.
   const [history, setHistory] = useState([]);
   const [chartRange, setChartRange] = useState('7d'); // '7d', '30d', '1y'
   const [snapshots, setSnapshots] = useState([]);
@@ -70,6 +74,7 @@ const App = () => {
   const [saveStatus, setSaveStatus] = useState('synced');
   const [error, setError] = useState(null);
   const [aiInsights, setAiInsights] = useState(null);
+  const [cachedAiDate, setCachedAiDate] = useState(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [guruIndex, setGuruIndex] = useState(0);
 
@@ -120,6 +125,10 @@ const App = () => {
         const data = snap.data();
         setAssets(data.assets || []);
         setSnapshots(data.snapshots || []);
+        if (data.dailyAiInsights) {
+          setAiInsights(data.dailyAiInsights.content);
+          setCachedAiDate(data.dailyAiInsights.date);
+        }
       }
     }, (err) => {
       console.error("Firestore 동기화 에러:", err);
@@ -164,149 +173,296 @@ const App = () => {
     }
   };
 
+  const resetTodayData = async () => {
+    if (!isAdmin || !db) return;
+    if (!window.confirm("오늘의 스냅샷과 AI 분석 데이터를 초기화하시겠습니까? (차트와 AI가 새로고침됩니다)")) return;
+
+    setSaveStatus('saving');
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const updatedSnapshots = snapshots.filter(s => s.date !== today);
+
+      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+
+      // Firestore에서 오늘자 데이터 삭제 및 필드 초기화
+      await setDoc(sharedDoc, {
+        snapshots: updatedSnapshots,
+        dailyAiInsights: { date: 'reset', content: null }
+      }, { merge: true });
+
+      setSnapshots(updatedSnapshots);
+      setAiInsights(null);
+      setCachedAiDate(null);
+      setSaveStatus('synced');
+
+      // 트리거: 새로고침
+      await fetchMarketData();
+      await fetchAiInsights(true);
+
+      alert("오늘의 데이터가 초기화되었습니다.");
+    } catch (e) {
+      console.error("초기화 실패:", e);
+      setSaveStatus('error');
+      alert("초기화 중 오류가 발생했습니다.");
+    }
+  };
+
   const fetchMarketData = async () => {
     if (assets.length === 0) return;
     setLoading(true);
     setError(null);
 
     try {
-      // 1. Yahoo Finance 티커 매핑 (코인은 -USD, 나머지는 그대로)
-      const cryptoList = ['BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'DOT'];
-      const yfTickers = assets.map(a => {
-        const s = a.symbol.toUpperCase();
-        return cryptoList.includes(s) ? `${s}-USD` : s;
+      // 1. 티커 정리 및 중복 제거
+      const uniqueSymbols = [...new Set(assets.map(a => a.symbol.toUpperCase()))];
+
+      // 암호화폐 감지 로직 강화
+      const yfTickers = uniqueSymbols.map(s => {
+        // 이미 -USD가 붙어있거나 .으로 시장이 지정되어 있으면 그대로 사용
+        if (s.includes('-') || s.includes('.')) return s;
+        // 일반적으로 3~5글자 대문자이면서 숫자가 섞인 경우 등 crypto일 확률이 높은 경우 시도 (현실적으로는 목록 관리가 안전)
+        const commonCryptos = ['BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'DOT', 'BNB', 'LINK', 'AVAX', 'MATIC', 'TRX', 'UNI'];
+        return commonCryptos.includes(s) ? `${s}-USD` : s;
       });
 
-      // 2. 현재가 및 히스토리 취합을 위한 병렬 호출 (개별 실패 처리)
+      // 2. 1차: 실시간 시세 로드 (v7 quote API)
+      const targetUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${yfTickers.join(',')}`;
+      // 다중 프록시 시도 (CORS 및 안정성 확보)
+      const proxies = [
+        `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
+        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`
+      ];
+
+      const fetchWithProxy = async (proxyList) => {
+        for (const url of proxyList) {
+          try {
+            const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+            if (!res.ok) continue;
+            const data = await res.json();
+            const contents = data.contents || data;
+            const json = typeof contents === 'string' ? JSON.parse(contents) : contents;
+            if (json) return json;
+          } catch (e) {
+            console.warn(`Proxy ${url} failed or timed out.`);
+          }
+        }
+        return null;
+      };
+
+      try {
+        const quoteJson = await fetchWithProxy(proxies);
+        if (quoteJson) {
+          const quotes = quoteJson.quoteResponse?.result || [];
+          const quickPrices = {};
+          const quickPrevPrices = {};
+          const quickStates = {};
+          quotes.forEach(q => {
+            const sym = q.symbol.replace('-USD', '').toUpperCase();
+            quickPrices[sym] = q.regularMarketPrice || q.postMarketPrice || q.preMarketPrice || 0;
+            quickStates[sym] = q.marketState; // REGULAR, POSTPOST, CLOSED, etc.
+
+            // 기준가 설정 로직:
+            // 장 종료 후에도 Yahoo API는 보통 해당 세션의 Open 정보를 유지하므로 이를 우선 활용합니다.
+            quickPrevPrices[sym] = q.regularMarketOpen || q.regularMarketPreviousClose || quickPrices[sym];
+          });
+
+          setPrices(prev => ({ ...prev, ...quickPrices }));
+          setPrevPrices(prev => ({ ...prev, ...quickPrevPrices }));
+          setMarketStates(prev => ({ ...prev, ...quickStates }));
+
+          // 데이터가 일부라도 로드되었으면 로딩 종료
+          if (Object.keys(quickPrices).length > 0) {
+            setLoading(false);
+          }
+        }
+      } catch (e) {
+        console.warn("현재가 API 로딩 실패, 차트 데이터로 대체 시도:", e);
+      }
+
+      // 3. 2차: 과거 데이터 및 상세 정보 로드 (차트용)
       const fetchHistory = async (symbol) => {
+        const chartUrl = `https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1y`;
+        const historyProxies = [
+          `https://api.allorigins.win/get?url=${encodeURIComponent(chartUrl)}`,
+          `https://corsproxy.io/?${encodeURIComponent(chartUrl)}`,
+          `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(chartUrl)}`
+        ];
+
         try {
-          const range = '1y';
-          const interval = '1d';
-
-          const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`)}`;
-          const res = await fetch(proxyUrl);
-          const data = await res.json();
-          if (!data || !data.contents) return null;
-
-          const json = JSON.parse(data.contents);
-          if (!json.chart || !json.chart.result || !json.chart.result[0]) return null;
-
+          const json = await fetchWithProxy(historyProxies);
+          if (!json || !json.chart || !json.chart.result || !json.chart.result[0]) return null;
           return { originalTicker: symbol, data: json.chart.result[0] };
         } catch (e) {
-          console.warn(`[MarketData] ${symbol} 로드 실패:`, e);
+          console.error(`${symbol} 데이터 로드 실패:`, e);
           return null;
         }
       };
 
+      // 병렬 요청 (단, 프록시 과부하 방지를 위해 티커가 너무 많으면 주의 필요)
       const results = await Promise.all(yfTickers.map(t => fetchHistory(t)));
       const validResults = results.filter(r => r !== null);
 
-      if (validResults.length === 0) {
-        throw new Error("모든 자산의 시세 데이터를 가져오는데 실패했습니다.");
-      }
-
-      const newPrices = {};
-      const historyMap = {}; // date -> { SYMBOL: price }
+      const historyMap = {};
+      const finalPricesFromHistory = {};
 
       validResults.forEach((res) => {
-        // 원래 티커 찾기 (yfTickers와 assets 순서 동일)
         const chart = res.data;
-        const meta = chart.meta;
-        const symbol = meta.symbol.replace('-USD', '').toUpperCase(); // 정규화
-
-        const indicators = chart.indicators.quote[0];
-        const quote = indicators.close || indicators.open || [];
+        const symbol = chart.meta.symbol.replace('-USD', '').toUpperCase();
+        const quotes = chart.indicators.quote[0];
+        const closePrices = quotes.close || [];
+        const openPrices = quotes.open || [];
         const timestamps = chart.timestamp || [];
 
-        // 현재가 설정 (가장 최신 가격 우선)
-        newPrices[symbol] = meta.regularMarketPrice || quote[quote.length - 1] || 0;
+        // 실시간 시세가 아직 없다면 차트의 마지막 값을 사용
+        finalPricesFromHistory[symbol] = chart.meta.regularMarketPrice || closePrices[closePrices.length - 1] || 0;
 
-        // 히스토리 데이터 매핑
         timestamps.forEach((ts, tIdx) => {
           const date = new Date(ts * 1000).toISOString().split('T')[0];
-          const price = quote[tIdx];
-          if (price !== undefined && price !== null) {
+          const cPrice = closePrices[tIdx];
+          const oPrice = openPrices[tIdx];
+          if (cPrice !== undefined && cPrice !== null) {
             if (!historyMap[date]) historyMap[date] = { date };
-            historyMap[date][symbol] = price;
+            historyMap[date][symbol] = cPrice;
+            // 시초가 데이터도 히스토리에 저장 (_open 접미사 사용)
+            if (oPrice !== undefined && oPrice !== null) {
+              historyMap[date][symbol + '_OPEN'] = oPrice;
+            }
           }
         });
       });
 
-      setPrices(newPrices);
-
       const sortedHistory = Object.values(historyMap).sort((a, b) => a.date.localeCompare(b.date));
-      setHistory(sortedHistory);
 
-      // 전일 종가 데이터 추출 (가장 최근 과거 날짜 데이터)
-      if (sortedHistory.length >= 2) {
-        const yesterdayData = sortedHistory[sortedHistory.length - 2];
-        setPrevPrices(yesterdayData);
-      } else if (sortedHistory.length === 1) {
-        setPrevPrices(sortedHistory[0]);
+      // 최종 가격 및 이전 가격 병합 업데이트
+      setPrices(prev => {
+        const merged = { ...prev };
+        Object.keys(finalPricesFromHistory).forEach(s => {
+          if (!merged[s] || merged[s] === 0) merged[s] = finalPricesFromHistory[s];
+        });
+        return merged;
+      });
+
+      if (sortedHistory.length >= 1) {
+        setPrevPrices(prev => {
+          const merged = { ...prev };
+          uniqueSymbols.forEach(sym => {
+            // 각 심볼별로 가장 최신의 시초가(_OPEN)를 히스토리에서 역으로 찾음
+            // (암호화폐는 오늘 데이터가 있고 주식은 금요일 데이터만 있는 경우 대비)
+            for (let i = sortedHistory.length - 1; i >= 0; i--) {
+              const dayData = sortedHistory[i];
+              if (dayData[sym + '_OPEN']) {
+                merged[sym] = dayData[sym + '_OPEN'];
+                break;
+              } else if (dayData[sym] && !merged[sym]) {
+                // 시초가가 없는 데이터(오래된 암호화폐 히스토리 등)의 경우 종가를 사용
+                merged[sym] = dayData[sym];
+                break;
+              }
+            }
+          });
+          return merged;
+        });
       }
 
-      // AI 분석은 Yahoo Finance 가격 데이터를 바탕으로 실행
-      const symbolsStr = assets.map(a => a.symbol).join(', ');
-      fetchAiInsights(symbolsStr, newPrices);
+      setHistory(sortedHistory);
 
     } catch (e) {
-      console.error("Yahoo Finance 로드 실패:", e);
-      setError("실시간 시세를 불러오는데 실패했습니다. (Yahoo Finance API)");
+      console.error("데이터 로드 중 치명적 오류:", e);
+      setError("데이터를 불러오는 중 오류가 발생했습니다.");
     } finally {
       setLoading(false);
     }
   };
 
-  const fetchAiInsights = async (symbols, currentPrices) => {
+  const fetchAiInsights = async (force = false) => {
     const currentApiKey = getApiKey();
-    if (!currentApiKey || !assets.length) return;
+    if (!assets.length) return;
+
+    if (!currentApiKey) {
+      if (isAdmin) {
+        setError("Gemini API 키가 설정되지 않았습니다. .env 파일에 VITE_GEMINI_API_KEY를 추가하세요.");
+      }
+      return;
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    // 오늘 날짜의 캐시된 데이터가 이미 있으면 호출하지 않음 (강제 새로고침 제외)
+    if (!force && cachedAiDate === today && aiInsights && !aiInsights.error) {
+      console.log("오늘의 AI 분석이 이미 존재합니다. (캐시 사용)");
+      return;
+    }
+
+    // 관리자가 아닐 경우 다른 사용자가 캐시를 생성할 때까지 대기 (API 사용량 절약)
+    if (user?.email?.toLowerCase() !== ADMIN_EMAIL.toLowerCase()) {
+      console.log("관리자가 분석을 업데이트할 때까지 대기 중...");
+      return;
+    }
+
     setIsAiLoading(true);
     try {
       const portfolioSummary = assets.map(a => `${a.symbol}: ${a.quantity}주 (보유단가: $${a.buyPrice || 'unknown'})`).join(', ');
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${currentApiKey}`, {
+      // v1beta 및 gemini-2.0-flash 사용 (사용자 요청에 따라 최신 모델로 업데이트)
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(currentApiKey)}`;
+
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{
             parts: [{
-              text: `당신은 세계적인 투자 거장 3인(워렌 버핏, 스탠리 드러켄밀러, 캐시 우드)입니다. 다음 포트폴리오를 분석하고 답변은 반드시 한국어로 하세요: [${portfolioSummary}].
-              현재 시장 상황을 검색(Search)하여 각 인물의 철학에 따른 분석(advice: 2문장), 구체적인 행동 지침(action: 1문장), 그리고 현재 추천하는 픽(pick: {symbol, reason})을 제공하세요.
-              
-              응답은 반드시 아래 형식의 순수한 JSON이어야 하며, 마크다운(\`\`\`json)이나 앞뒤 설명 없이 오직 { 로 시작해서 } 로 끝나는 JSON 데이터만 출력하세요:
-        {
-          "buffett": { "advice": "...", "action": "...", "pick": { "symbol": "...", "reason": "..." } },
-          "druckenmiller": { "advice": "...", "action": "...", "pick": { "symbol": "...", "reason": "..." } },
-          "cathie": { "advice": "...", "action": "...", "pick": { "symbol": "...", "reason": "..." } }
-        }`
+              text: `다음 자산 목록을 바탕으로 거장 3인(워렌 버핏, 스탠리 드러켄밀러, 캐시 우드)의 스타일로 투자 조언을 생성하세요: [${portfolioSummary}].
+              결과는 반드시 순수 JSON이어야 하며, 다른 말은 하지 마세요.
+              구조: {"buffett": {"advice": "...", "action": "...", "pick": {"symbol": "...", "reason": "..."}}, "druckenmiller": ..., "cathie": ...}`
             }]
-          }],
-          tools: [{ google_search: {} }]
+          }]
         })
       });
 
       const resData = await response.json();
-      if (resData.error) throw new Error(resData.error.message);
 
-      const textResponse = resData.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!textResponse) throw new Error("AI 응답 내용이 비어있습니다.");
-
-      // 보다 강력한 JSON 추출 로직 적용
-      const jsonStart = textResponse.indexOf('{');
-      const jsonEnd = textResponse.lastIndexOf('}');
-      if (jsonStart !== -1 && jsonEnd !== -1) {
-        const jsonStr = textResponse.substring(jsonStart, jsonEnd + 1);
-        const content = JSON.parse(jsonStr);
-        setAiInsights(content);
-      } else {
-        throw new Error("올바른 JSON 형식을 찾을 수 없습니다.");
+      if (!response.ok) {
+        console.error("Gemini API 에러 상세:", resData);
+        throw new Error(resData.error?.message || `API 요청 실패 (Status: ${response.status})`);
       }
+
+      let textResponse = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!textResponse) throw new Error("AI 응답이 비어있습니다.");
+
+      // JSON만 추출
+      const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("JSON 형식을 찾을 수 없거나 형식이 잘못되었습니다.");
+      textResponse = jsonMatch[0];
+
+      let content = JSON.parse(textResponse);
+
+      // 키 매핑 (유연한 키 지원)
+      const mappedContent = {
+        buffett: content.buffett || content.warren_buffett || content.Buffett || {},
+        druckenmiller: content.druckenmiller || content.stanley_druckenmiller || content.Druckenmiller || {},
+        cathie: content.cathie || content.cathie_wood || content.Cathie || {}
+      };
+
+      setAiInsights(mappedContent);
+      setIsAiLoading(false); // 분석 결과가 나오면 로딩 종료
+
+      // Firestore에 오늘자 분석 결과 저장 (백그라운드에서 실행)
+      try {
+        const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+        await setDoc(sharedDoc, {
+          dailyAiInsights: { date: today, content: mappedContent }
+        }, { merge: true });
+      } catch (dbErr) {
+        console.warn("Firestore 캐시 저장 실패 (하지만 분석은 완료됨):", dbErr);
+      }
+
     } catch (e) {
       console.error("AI Insight 생성 실패:", e);
-      // 에러 시 사용자에게 알리기 위해 빈 상태가 아닌 에러 상태를 표시할 수 있습니다.
-      setAiInsights({ error: true });
-    } finally {
       setIsAiLoading(false);
+      if (!aiInsights || force) {
+        setAiInsights({ error: true });
+      }
     }
   };
 
@@ -314,7 +470,14 @@ const App = () => {
     if (assets.length > 0) {
       fetchMarketData();
     }
-  }, [JSON.stringify(assets), chartRange]);
+  }, [JSON.stringify(assets)]); // chartRange 제거 (로딩 속도 개선)
+
+  useEffect(() => {
+    if (assets.length > 0) {
+      fetchAiInsights();
+    }
+  }, [JSON.stringify(assets)]);
+  // AI 인사이트 중복 호출 방지를 위해 마켓 데이터와 분리하여 관리합니다.
 
   const addAsset = (e) => {
     e.preventDefault();
@@ -512,6 +675,18 @@ const App = () => {
               <span className="hidden md:inline">{loading ? '동기화 중...' : '새로고침'}</span>
             </button>
 
+            {isAdmin && (
+              <button
+                onClick={resetTodayData}
+                disabled={loading}
+                className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 h-10 px-4 rounded-xl transition-all flex items-center justify-center gap-2 text-xs font-bold"
+                title="오늘 데이터 초기화"
+              >
+                <Trash2 size={14} />
+                <span className="hidden md:inline">초기화</span>
+              </button>
+            )}
+
             {user ? (
               <button
                 onClick={handleLogout}
@@ -680,7 +855,18 @@ const App = () => {
                         <span className="text-[12px] font-black text-white uppercase tracking-[0.25em]">Expert Insights</span>
                         <div className="flex items-center gap-2 mt-0.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                          <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Real-time Guru Sync</p>
+                          <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">
+                            {cachedAiDate === new Date().toISOString().split('T')[0] ? 'Today\'s Analysis Cached' : 'Real-time Guru Sync'}
+                          </p>
+                          {isAdmin && (
+                            <button
+                              onClick={() => fetchAiInsights(true)}
+                              className="ml-2 p-1 rounded-md bg-white/5 hover:bg-white/10 transition-colors"
+                              title="Force AI Refresh"
+                            >
+                              <RefreshCw size={10} className={`${isAiLoading ? 'animate-spin text-indigo-400' : 'text-slate-500'}`} />
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -695,7 +881,7 @@ const App = () => {
                     </div>
                   </div>
 
-                  <div className="relative flex-1 min-h-[460px] md:min-h-[400px]">
+                  <div className="relative flex-1 min-h-[500px]">
                     {[
                       {
                         name: "WARREN BUFFETT",
@@ -724,43 +910,67 @@ const App = () => {
                     ].map((guru, i) => (
                       <div
                         key={i}
-                        className={`absolute inset-0 transition-all duration-500 ease-out transform bg-[#020617]/40 backdrop-blur-sm ${guruIndex === i ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-8 scale-95 pointer-events-none'
+                        className={`absolute inset-0 transition-all duration-700 ease-in-out transform ${guruIndex === i ? 'opacity-100 translate-x-0 scale-100 pointer-events-auto' : 'opacity-0 translate-x-12 scale-95 pointer-events-none'
                           }`}
                       >
-                        <div className="flex flex-col xl:flex-row gap-8 items-start h-full">
-                          <div className="flex items-center gap-5 shrink-0 mb-4 xl:mb-0">
+                        <div className="flex flex-col gap-8 h-full">
+                          {/* Guru Header */}
+                          <div className="flex items-center gap-6 shrink-0 bg-white/[0.02] p-6 rounded-[2.5rem] border border-white/5">
                             <div className="relative group/avatar">
-                              <div className={`absolute -inset-2 bg-gradient-to-tr from-${guru.color}-500 to-transparent rounded-full opacity-20 group-hover/avatar:opacity-50 transition-all duration-700 blur-sm`}></div>
-                              <img src={guru.image} alt={guru.name} className="w-16 h-16 rounded-full object-cover border-4 border-white/10 relative z-10 shadow-2xl transition-transform duration-700 group-hover/avatar:scale-105" />
-                              <div className={`absolute -bottom-1 -right-1 bg-[#020617] p-2 rounded-full border border-white/10 z-20 shadow-xl group-hover/avatar:rotate-12 transition-all`}>
+                              <div className={`absolute -inset-2 bg-gradient-to-tr from-${guru.color}-500 to-transparent rounded-full opacity-20 group-hover/avatar:opacity-40 transition-all duration-700 blur-md`}></div>
+                              <img src={guru.image} alt={guru.name} className="w-20 h-20 rounded-full object-cover border-4 border-white/10 relative z-10 shadow-2xl transition-transform duration-700 group-hover/avatar:scale-110" />
+                              <div className={`absolute -bottom-1 -right-1 bg-[#020617] p-2.5 rounded-full border border-white/10 z-20 shadow-xl group-hover/avatar:rotate-12 transition-all`}>
                                 {guru.icon}
                               </div>
                             </div>
                             <div>
-                              <div className="text-xl font-black text-white tracking-tighter uppercase">{guru.name}</div>
-                              <div className={`text-[10px] font-black text-${guru.color}-400 uppercase tracking-[0.3em] mt-0.5 opacity-80`}>{guru.role}</div>
+                              <div className="text-2xl font-black text-white tracking-tighter uppercase leading-none">{guru.name}</div>
+                              <div className={`text-[11px] font-black text-${guru.color}-400 uppercase tracking-[0.4em] mt-2 opacity-80`}>{guru.role}</div>
                             </div>
                           </div>
 
-                          <div className="flex-1 flex flex-col gap-6 w-full min-h-0">
-                            <div className="relative overflow-y-auto custom-scrollbar pr-4 -mr-4 max-h-[120px]">
-                              <div className="absolute -left-5 top-0 bottom-0 w-[2px] bg-gradient-to-b from-indigo-500/40 via-transparent to-transparent"></div>
-                              <p className="text-[13px] font-medium text-slate-300 leading-relaxed italic pl-1 h-full scrollbar-none">
-                                "{isAiLoading ? "Analyzing market dynamics..." : (aiInsights?.error ? "Sync interrupted." : (guru.data?.advice || "Analyzing holdings..."))}"
-                              </p>
+                          {/* Advice & Content */}
+                          <div className="flex-1 flex flex-col gap-6 px-4">
+                            <div className="relative">
+                              <div className="absolute -left-6 top-0 bottom-0 w-[3px] bg-gradient-to-b from-indigo-500/50 via-indigo-500/10 to-transparent rounded-full"></div>
+                              <div className="text-[15px] font-semibold text-slate-200 leading-[1.8] italic">
+                                {isAiLoading ? (
+                                  <div className="space-y-3 animate-pulse">
+                                    <div className="h-4 bg-white/5 rounded-full w-3/4"></div>
+                                    <div className="h-4 bg-white/5 rounded-full w-1/2"></div>
+                                  </div>
+                                ) :
+                                  aiInsights?.error ? "현재 AI 분석이 지연되고 있습니다. 잠시 후 관리자 동기화를 대기해 주세요." :
+                                    !assets.length ? "분석할 자산이 없습니다." :
+                                      guru.data?.advice ? `"${guru.data.advice}"` :
+                                        !user ? "분석 대기 중..." : "데이터 로딩 중..."}
+                              </div>
                             </div>
 
-                            {guru.data?.pick && !isAiLoading && (
-                              <div className={`p-5 rounded-3xl bg-${guru.color}-500/5 border border-${guru.color}-500/10 backdrop-blur-sm shadow-xl group/pick hover:bg-${guru.color}-500/10 transition-all duration-500`}>
-                                <div className="flex items-center gap-4 mb-3">
-                                  <span className={`text-[9px] font-black px-3 py-1 rounded-full bg-${guru.color}-500/10 text-${guru.color}-400 uppercase tracking-widest ring-1 ring-${guru.color}-500/20`}>Alpha Focus (Top Pick)</span>
-                                  <span className="text-lg font-black text-white tracking-widest">{guru.data.pick.symbol}</span>
+                            {/* Action & Pick */}
+                            <div className="mt-2 space-y-4">
+                              {guru.data?.action && (
+                                <div className="text-[11px] font-black text-indigo-400 uppercase tracking-[0.2em] flex items-center gap-3">
+                                  <span className="w-8 h-[1px] bg-indigo-500/30"></span>
+                                  Next Action: {guru.data.action}
                                 </div>
-                                <p className="text-[11px] font-bold text-slate-400 leading-relaxed">
-                                  {guru.data.pick.reason}
-                                </p>
-                              </div>
-                            )}
+                              )}
+
+                              {guru.data?.pick && !isAiLoading && (
+                                <div className={`p-6 rounded-[2rem] bg-${guru.color}-500/[0.03] border border-${guru.color}-500/10 backdrop-blur-xl group/pick hover:bg-${guru.color}-500/05 transition-all duration-500`}>
+                                  <div className="flex items-center justify-between mb-4">
+                                    <div className="flex items-center gap-3">
+                                      <div className={`w-2 h-2 rounded-full bg-${guru.color}-500 animate-pulse`}></div>
+                                      <span className={`text-[10px] font-black text-${guru.color}-400 uppercase tracking-widest`}>Strategic Pick</span>
+                                    </div>
+                                    <span className="text-xl font-black text-white tracking-[0.15em] drop-shadow-lg">{guru.data.pick.symbol}</span>
+                                  </div>
+                                  <p className="text-[12px] font-medium text-slate-400 leading-relaxed pl-5 border-l-2 border-white/5 group-hover/pick:border-indigo-500/30 transition-colors">
+                                    {guru.data.pick.reason}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -898,13 +1108,22 @@ const App = () => {
                       <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Qty</th>
                       <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60 hidden sm:table-cell">Avg Cost</th>
                       <th className="px-4 md:px-10 py-4 md:py-6 font-black opacity-60">Price</th>
+                      <th className="px-4 md:px-10 py-4 md:py-6 text-right font-black opacity-60">Day Chg</th>
                       <th className="px-4 md:px-10 py-4 md:py-6 text-right font-black opacity-60">PnL</th>
                       {isAdmin && <th className="px-4 md:px-10 py-4 md:py-6 text-right w-20"></th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.03]">
                     {displayAssets.map(a => {
-                      const currentPrice = prices[a.symbol.toUpperCase()] || a.buyPrice || 0;
+                      const sym = a.symbol.toUpperCase();
+                      const currentPrice = prices[sym] || a.buyPrice || 0;
+                      const prevPrice = prevPrices[sym] || currentPrice;
+                      const mState = marketStates[sym] || 'CLOSED';
+                      const isRegular = mState === 'REGULAR';
+
+                      const dChg = currentPrice - prevPrice;
+                      const dChgPercent = prevPrice > 0 ? (dChg / prevPrice) * 100 : 0;
+
                       const profit = (currentPrice - a.buyPrice) * a.quantity;
                       const pPercent = a.buyPrice > 0 ? ((currentPrice - a.buyPrice) / a.buyPrice) * 100 : 0;
 
@@ -917,6 +1136,7 @@ const App = () => {
                               </div>
                               <div className="flex flex-col">
                                 <span className="font-black text-white text-[11px] md:text-lg tracking-tight uppercase">{a.symbol}</span>
+                                <span className="text-[8px] font-bold text-slate-600 opacity-60 tracking-tighter uppercase">{mState}</span>
                               </div>
                             </div>
                           </td>
@@ -932,9 +1152,22 @@ const App = () => {
                             </span>
                           </td>
                           <td className="px-2 md:px-10 py-4 md:py-8 text-right">
+                            <div className={`flex flex-col items-end`}>
+                              <span className={`font-black text-[10px] md:text-sm tabular-nums ${dChg >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {dChg >= 0 ? '+' : ''}{dChgPercent.toFixed(2)}%
+                              </span>
+                              <span className="text-[9px] font-bold text-slate-600 uppercase tracking-tighter">
+                                vs Open
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-2 md:px-10 py-4 md:py-8 text-right">
                             <span className={`font-black text-[11px] md:text-lg tabular-nums ${profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                               {profit >= 0 ? '+' : ''}${profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                             </span>
+                            <div className="text-[9px] font-bold text-slate-600 tabular-nums">
+                              {pPercent >= 0 ? '+' : ''}{pPercent.toFixed(1)}% Total
+                            </div>
                           </td>
                           {isAdmin && (
                             <td className="px-4 md:px-10 py-6 md:py-8 text-right">
