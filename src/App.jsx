@@ -78,6 +78,12 @@ const App = () => {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [guruIndex, setGuruIndex] = useState(0);
 
+  // 멀티 포트폴리오 상태
+  const [currentPortfolioId, setCurrentPortfolioId] = useState('shared-portfolio');
+  const [availablePortfolios, setAvailablePortfolios] = useState([
+    { id: 'shared-portfolio', name: '대표 포트폴리오' }
+  ]);
+
   // 구루 슬라이더 자동 회전
   useEffect(() => {
     if (!aiInsights) return;
@@ -115,17 +121,32 @@ const App = () => {
 
   const handleLogout = () => signOut(auth);
 
-  // 데이터 동기화 (이제 모든 유저가 동일한 shared 경로를 봅니다)
+  // 데이터 동기화 (단일 문서 체제로 통합하여 권한 문제 해결)
   useEffect(() => {
     if (!db) return;
-    // 고정된 경로에서 데이터를 읽어옵니다.
-    const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
-    const unsubscribe = onSnapshot(sharedDoc, (snap) => {
+
+    // 유일하게 권한이 허용된 'shared-portfolio' 문서 하나만 감시합니다.
+    const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+    const unsubscribe = onSnapshot(masterDoc, (snap) => {
+      setLoading(true);
       if (snap.exists()) {
         const data = snap.data();
-        setAssets(data.assets || []);
 
-        // 날짜 정규화 함수 내부 정의 (재사용성)
+        // 1. 포트폴리오 목록 업데이트
+        if (data.portfolioList) {
+          setAvailablePortfolios(data.portfolioList);
+        }
+
+        // 2. 현재 선택된 포트폴리오의 데이터 추출
+        const pData = data.portfoliosData?.[currentPortfolioId] || {};
+
+        // 만약 'shared-portfolio'(순정 상태) 데이터가 루트에 있다면 그것을 기본값으로 활용
+        const finalAssets = pData.assets || (currentPortfolioId === 'shared-portfolio' ? data.assets : []) || [];
+        const finalSnapshots = pData.snapshots || (currentPortfolioId === 'shared-portfolio' ? data.snapshots : []) || [];
+        const finalAi = pData.dailyAiInsights || (currentPortfolioId === 'shared-portfolio' ? data.dailyAiInsights : null);
+
+        setAssets(finalAssets);
+
         const normalize = (d) => {
           if (!d || typeof d !== 'string') return d;
           const parts = d.split('-');
@@ -133,23 +154,69 @@ const App = () => {
           return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
         };
 
-        // 스냅샷 불러올 때부터 정규화 처리
-        const cleanSnapshots = (data.snapshots || []).map(s => ({
+        const cleanSnapshots = finalSnapshots.map(s => ({
           ...s,
           date: normalize(s.date)
         }));
         setSnapshots(cleanSnapshots);
 
-        if (data.dailyAiInsights) {
-          setAiInsights(data.dailyAiInsights.content);
-          setCachedAiDate(data.dailyAiInsights.date);
+        if (finalAi) {
+          setAiInsights(finalAi.content);
+          setCachedAiDate(finalAi.date);
+        } else {
+          setAiInsights(null);
+          setCachedAiDate(null);
         }
       }
+      setLoading(false);
     }, (err) => {
       console.error("Firestore 동기화 에러:", err);
+      setLoading(false);
     });
+
     return () => unsubscribe();
-  }, []);
+  }, [currentPortfolioId]);
+
+  // 새로운 포트폴리오 추가 기능 (권한 우회를 위해 단일 문서 내에 저장)
+  const addNewPortfolio = async () => {
+    if (!isAdmin) return;
+    const name = window.prompt("새로운 포트폴리오 이름을 입력하세요:");
+    if (!name || name.trim() === '') return;
+
+    const id = `portfolio-${Date.now()}`;
+    const newPortfolios = [...availablePortfolios, { id, name: name.trim() }];
+
+    try {
+      const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      await setDoc(masterDoc, {
+        portfolioList: newPortfolios
+      }, { merge: true });
+      setCurrentPortfolioId(id);
+    } catch (e) {
+      console.error("포트폴리오 추가 실패:", e);
+      alert("추가에 실패했습니다: " + e.message);
+    }
+  };
+
+  // 포트폴리오 삭제 기능
+  const deletePortfolio = async (idToDelete) => {
+    if (!isAdmin || idToDelete === 'shared-portfolio') return;
+    if (!window.confirm("이 포트폴리오와 모든 데이터를 삭제하시겠습니까?")) return;
+
+    const newPortfolios = availablePortfolios.filter(p => p.id !== idToDelete);
+    try {
+      const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      await setDoc(masterDoc, {
+        portfolioList: newPortfolios
+      }, { merge: true });
+
+      if (currentPortfolioId === idToDelete) {
+        setCurrentPortfolioId('shared-portfolio');
+      }
+    } catch (e) {
+      console.error("포트폴리오 삭제 실패:", e);
+    }
+  };
 
   // 오늘 시점의 포트폴리오 가치를 기록합니다.
   const saveSnapshot = async (totalValue) => {
@@ -161,9 +228,15 @@ const App = () => {
     const dayOfWeek = new Date().getDay(); // 0: 일요일, 6: 토요일
     if (dayOfWeek === 0 || dayOfWeek === 6) return;
 
-    // 이미 오늘 기록이 있는지 확인 (중복 제거 로직 강화)
-    const alreadySaved = snapshots.some(s => s.date === today);
-    if (alreadySaved) return;
+    // 데이터 누락 방지: 오늘 이미 저장된 값이 있지만, 
+    // 새로 계산된 값이 이전에 저장된 값보다 크게 다르면(충실한 로딩 후라면) 업데이트 허용
+    const existingIdx = snapshots.findIndex(s => s.date === today);
+    if (existingIdx !== -1) {
+      const existingVal = snapshots[existingIdx].value;
+      // 이미 저장된 값이 현재 값과 비슷하거나, 현재 값이 터무니없이 작으면 업데이트 안 함
+      if (totalValue <= existingVal || totalValue < existingVal * 0.7) return;
+      console.log("포트폴리오 가치 업데이트 (더 정확한 데이터 감지):", totalValue);
+    }
 
     // 유효성 검사: 이전 대비 데이터가 너무 급격히 떨어지면(오류 가능성) 저장하지 않음
     if (snapshots.length > 0) {
@@ -177,14 +250,20 @@ const App = () => {
 
     try {
       const newSnapshot = { date: today, value: Math.round(totalValue) };
-      // 기존 스냅샷 정규화 및 정렬 후 병합
       const updatedSnapshots = [...snapshots, newSnapshot]
-        .filter((v, i, a) => a.findIndex(t => t.date === v.date) === i) // 중복 체크
+        .filter((v, i, a) => a.findIndex(t => t.date === v.date) === i)
         .sort((a, b) => a.date.localeCompare(b.date));
 
-      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
-      await setDoc(sharedDoc, { snapshots: updatedSnapshots }, { merge: true });
-      console.log("오늘의 포트폴리오 가치가 기록되었습니다:", totalValue);
+      const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      if (currentPortfolioId === 'shared-portfolio') {
+        await setDoc(masterDoc, { snapshots: updatedSnapshots }, { merge: true });
+      } else {
+        // 중첩 구조로 저장
+        await setDoc(masterDoc, {
+          portfoliosData: { [currentPortfolioId]: { snapshots: updatedSnapshots } }
+        }, { merge: true });
+      }
+      console.log("포트폴리오 가치가 기록되었습니다:", totalValue);
     } catch (e) {
       console.error("스냅샷 저장 실패:", e);
     }
@@ -198,8 +277,14 @@ const App = () => {
     }
     setSaveStatus('saving');
     try {
-      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
-      await setDoc(sharedDoc, { assets: updated }, { merge: true });
+      const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      if (currentPortfolioId === 'shared-portfolio') {
+        await setDoc(masterDoc, { assets: updated }, { merge: true });
+      } else {
+        await setDoc(masterDoc, {
+          portfoliosData: { [currentPortfolioId]: { assets: updated } }
+        }, { merge: true });
+      }
       setSaveStatus('synced');
     } catch (e) {
       setSaveStatus('error');
@@ -214,12 +299,23 @@ const App = () => {
     try {
       const today = new Date().toISOString().split('T')[0];
       const updatedSnapshots = snapshots.filter(s => s.date !== today);
-      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
 
-      await setDoc(sharedDoc, {
-        snapshots: updatedSnapshots,
-        dailyAiInsights: { date: 'reset', content: null }
-      }, { merge: true });
+      if (currentPortfolioId === 'shared-portfolio') {
+        await setDoc(masterDoc, {
+          snapshots: updatedSnapshots,
+          dailyAiInsights: { date: 'reset', content: null }
+        }, { merge: true });
+      } else {
+        await setDoc(masterDoc, {
+          portfoliosData: {
+            [currentPortfolioId]: {
+              snapshots: updatedSnapshots,
+              dailyAiInsights: { date: 'reset', content: null }
+            }
+          }
+        }, { merge: true });
+      }
 
       setSnapshots(updatedSnapshots);
       setAiInsights(null);
@@ -242,8 +338,14 @@ const App = () => {
 
     setSaveStatus('saving');
     try {
-      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
-      await setDoc(sharedDoc, { snapshots: [] }, { merge: true });
+      const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      if (currentPortfolioId === 'shared-portfolio') {
+        await setDoc(masterDoc, { snapshots: [] }, { merge: true });
+      } else {
+        await setDoc(masterDoc, {
+          portfoliosData: { [currentPortfolioId]: { snapshots: [] } }
+        }, { merge: true });
+      }
       setSnapshots([]);
       setSaveStatus('synced');
       alert("차트 데이터가 초기화되었습니다. 새로고침 시 다시 수집됩니다.");
@@ -273,8 +375,14 @@ const App = () => {
         return { date: d.date, value: Math.round(v) };
       }).filter(s => s.value > 100); // 비정상적 저가는 제외
 
-      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
-      await setDoc(sharedDoc, { snapshots: newSnapshots }, { merge: true });
+      const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      if (currentPortfolioId === 'shared-portfolio') {
+        await setDoc(masterDoc, { snapshots: newSnapshots }, { merge: true });
+      } else {
+        await setDoc(masterDoc, {
+          portfoliosData: { [currentPortfolioId]: { snapshots: newSnapshots } }
+        }, { merge: true });
+      }
       setSnapshots(newSnapshots);
       console.log("차트 데이터 보충 완료:", newSnapshots.length, "건");
     } catch (e) {
@@ -532,10 +640,20 @@ const App = () => {
 
       // Firestore에 오늘자 분석 결과 저장 (백그라운드에서 실행)
       try {
-        const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
-        await setDoc(sharedDoc, {
-          dailyAiInsights: { date: today, content: mappedContent }
-        }, { merge: true });
+        const masterDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+        if (currentPortfolioId === 'shared-portfolio') {
+          await setDoc(masterDoc, {
+            dailyAiInsights: { date: today, content: mappedContent }
+          }, { merge: true });
+        } else {
+          await setDoc(masterDoc, {
+            portfoliosData: {
+              [currentPortfolioId]: {
+                dailyAiInsights: { date: today, content: mappedContent }
+              }
+            }
+          }, { merge: true });
+        }
       } catch (dbErr) {
         console.warn("Firestore 캐시 저장 실패 (하지만 분석은 완료됨):", dbErr);
       }
@@ -629,7 +747,8 @@ const App = () => {
       const sym = a.symbol.toUpperCase();
       // 실시간 시세(prices) 우선 -> 시세 누락 시 마지막 히스토리 가격(history) -> 그것도 없으면 매수가
       let currentPrice = prices[sym];
-      if (!currentPrice || currentPrice === 0) {
+      // 개장 전(null/0)이거나 데이터 누락 시 히스토리에서 가장 최신 가격을 끝까지 추적
+      if (currentPrice === undefined || currentPrice === null || currentPrice === 0) {
         if (history && history.length > 0) {
           for (let i = history.length - 1; i >= 0; i--) {
             if (history[i][sym] > 0) {
@@ -693,10 +812,11 @@ const App = () => {
 
   // 가격 정보가 업데이트되어 총 가치가 계산되면 관리자인 경우 자동으로 스냅샷 저장
   useEffect(() => {
-    if (isAdmin && stats.total > 0 && !loading) {
+    // 로딩이 완전히 끝나고 데이터가 유효할 때만 저장 트리거
+    if (isAdmin && stats.total > 0 && !loading && history.length > 0) {
       saveSnapshot(stats.total);
     }
-  }, [stats.total, isAdmin, loading, snapshots]);
+  }, [stats.total, isAdmin, loading, history.length]);
 
   const chartData = useMemo(() => {
     if (!history || history.length === 0) return [];
@@ -817,13 +937,53 @@ const App = () => {
 
         {/* Top Navigation */}
         <nav className="flex justify-between items-center glass-card p-4 px-4 md:px-8 border-b border-white/5">
-          <div className="flex items-center gap-3">
-            <div className="bg-indigo-600 p-2 rounded-xl shadow-lg shadow-indigo-500/30">
-              <Briefcase className="text-white" size={24} />
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-3">
+              <div className="bg-indigo-600 p-2 rounded-xl shadow-lg shadow-indigo-500/30">
+                <Briefcase className="text-white" size={24} />
+              </div>
+              <div className="hidden sm:block">
+                <h1 className="text-xl font-black tracking-tighter gradient-text leading-tight">PORTFOLIO PRO</h1>
+                {isAdmin && <span className="text-[9px] font-black text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full uppercase tracking-tighter">관리자 모드</span>}
+              </div>
             </div>
-            <div>
-              <h1 className="text-xl font-black tracking-tighter gradient-text leading-tight">PORTFOLIO PRO</h1>
-              {isAdmin && <span className="text-[9px] font-black text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full uppercase tracking-tighter">관리자 모드</span>}
+
+            {/* Portfolio Selector */}
+            <div className="h-10 flex items-center bg-black/20 rounded-xl border border-white/5 p-1 transition-all">
+              <div className="hidden md:flex items-center gap-2 px-3 opacity-40">
+                <LayoutDashboard size={14} />
+                <span className="text-[10px] font-black uppercase tracking-widest">Select</span>
+              </div>
+              <div className="flex items-center gap-1">
+                {availablePortfolios.map(p => (
+                  <div key={p.id} className="relative group">
+                    <button
+                      onClick={() => setCurrentPortfolioId(p.id)}
+                      className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${currentPortfolioId === p.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}`}
+                    >
+                      {p.name}
+                    </button>
+                    {isAdmin && p.id !== 'shared-portfolio' && currentPortfolioId === p.id && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deletePortfolio(p.id); }}
+                        className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="삭제"
+                      >
+                        <Trash2 size={8} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {isAdmin && (
+                  <button
+                    onClick={addNewPortfolio}
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-500 hover:text-indigo-400 hover:bg-white/5 transition-all"
+                    title="새 포트폴리오 추가"
+                  >
+                    <Plus size={16} />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -846,15 +1006,6 @@ const App = () => {
                 >
                   <Trash2 size={14} />
                   <span className="hidden md:inline">오늘 리셋</span>
-                </button>
-                <button
-                  onClick={resetAllSnapshots}
-                  disabled={loading}
-                  className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 h-10 px-4 rounded-xl transition-all flex items-center justify-center gap-2 text-xs font-bold"
-                  title="차트 히스토리 전체 초기화"
-                >
-                  <ChartIcon size={14} />
-                  <span className="hidden md:inline">차트 리셋</span>
                 </button>
               </div>
             )}
