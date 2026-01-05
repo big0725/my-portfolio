@@ -124,7 +124,22 @@ const App = () => {
       if (snap.exists()) {
         const data = snap.data();
         setAssets(data.assets || []);
-        setSnapshots(data.snapshots || []);
+
+        // 날짜 정규화 함수 내부 정의 (재사용성)
+        const normalize = (d) => {
+          if (!d || typeof d !== 'string') return d;
+          const parts = d.split('-');
+          if (parts.length !== 3) return d;
+          return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+        };
+
+        // 스냅샷 불러올 때부터 정규화 처리
+        const cleanSnapshots = (data.snapshots || []).map(s => ({
+          ...s,
+          date: normalize(s.date)
+        }));
+        setSnapshots(cleanSnapshots);
+
         if (data.dailyAiInsights) {
           setAiInsights(data.dailyAiInsights.content);
           setCachedAiDate(data.dailyAiInsights.date);
@@ -140,15 +155,33 @@ const App = () => {
   const saveSnapshot = async (totalValue) => {
     if (!isAdmin || !db || !totalValue) return;
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toISOString().split('T')[0]; // 항상 YYYY-MM-DD
 
-    // 이미 오늘 기록이 있는지 확인 (중복 기록 방지)
+    // 주말(토, 일)에는 저장하지 않음 (휴장일 제외 로직)
+    const dayOfWeek = new Date().getDay(); // 0: 일요일, 6: 토요일
+    if (dayOfWeek === 0 || dayOfWeek === 6) return;
+
+    // 이미 오늘 기록이 있는지 확인 (중복 제거 로직 강화)
     const alreadySaved = snapshots.some(s => s.date === today);
     if (alreadySaved) return;
 
+    // 유효성 검사: 이전 대비 데이터가 너무 급격히 떨어지면(오류 가능성) 저장하지 않음
+    if (snapshots.length > 0) {
+      const lastVal = snapshots[snapshots.length - 1].value;
+      // 가치가 50% 이상 급락한 경우는 데이터 누락일 확률이 큼
+      if (totalValue < lastVal * 0.5) {
+        console.warn("데이터 누락 의심으로 스냅샷 저장을 건너뜁니다 (이전 대비 급락):", totalValue);
+        return;
+      }
+    }
+
     try {
-      const newSnapshot = { date: today, value: totalValue };
-      const updatedSnapshots = [...snapshots, newSnapshot].sort((a, b) => a.date.localeCompare(b.date));
+      const newSnapshot = { date: today, value: Math.round(totalValue) };
+      // 기존 스냅샷 정규화 및 정렬 후 병합
+      const updatedSnapshots = [...snapshots, newSnapshot]
+        .filter((v, i, a) => a.findIndex(t => t.date === v.date) === i) // 중복 체크
+        .sort((a, b) => a.date.localeCompare(b.date));
+
       const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
       await setDoc(sharedDoc, { snapshots: updatedSnapshots }, { merge: true });
       console.log("오늘의 포트폴리오 가치가 기록되었습니다:", totalValue);
@@ -181,10 +214,8 @@ const App = () => {
     try {
       const today = new Date().toISOString().split('T')[0];
       const updatedSnapshots = snapshots.filter(s => s.date !== today);
-
       const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
 
-      // Firestore에서 오늘자 데이터 삭제 및 필드 초기화
       await setDoc(sharedDoc, {
         snapshots: updatedSnapshots,
         dailyAiInsights: { date: 'reset', content: null }
@@ -195,15 +226,59 @@ const App = () => {
       setCachedAiDate(null);
       setSaveStatus('synced');
 
-      // 트리거: 새로고침
       await fetchMarketData();
       await fetchAiInsights(true);
-
       alert("오늘의 데이터가 초기화되었습니다.");
     } catch (e) {
       console.error("초기화 실패:", e);
       setSaveStatus('error');
       alert("초기화 중 오류가 발생했습니다.");
+    }
+  };
+
+  const resetAllSnapshots = async () => {
+    if (!isAdmin || !db) return;
+    if (!window.confirm("차트의 모든 히스토리 데이터를 삭제하시겠습니까? (야후 파이낸스 데이터로 다시 채워집니다)")) return;
+
+    setSaveStatus('saving');
+    try {
+      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      await setDoc(sharedDoc, { snapshots: [] }, { merge: true });
+      setSnapshots([]);
+      setSaveStatus('synced');
+      alert("차트 데이터가 초기화되었습니다. 새로고침 시 다시 수집됩니다.");
+    } catch (e) {
+      console.error("차트 초기화 실패:", e);
+      setSaveStatus('error');
+    }
+  };
+
+  const backfillSnapshots = async (historyData) => {
+    if (!isAdmin || !db || !historyData || historyData.length === 0) return;
+    if (snapshots.length > 10) return; // 이미 데이터가 충분하면 자동 보충 안 함
+
+    console.log("차트 데이터 정밀 보충 시작...");
+    try {
+      const lastKnownPrices = {};
+      const newSnapshots = historyData.map(d => {
+        let v = 0;
+        assets.forEach(a => {
+          const sym = a.symbol.toUpperCase();
+          if (d[sym] !== undefined && d[sym] !== null && d[sym] > 0) {
+            lastKnownPrices[sym] = d[sym];
+          }
+          const price = lastKnownPrices[sym] || a.buyPrice || 0;
+          v += (a.quantity || 0) * price;
+        });
+        return { date: d.date, value: Math.round(v) };
+      }).filter(s => s.value > 100); // 비정상적 저가는 제외
+
+      const sharedDoc = doc(db, 'artifacts', appId, 'settings', 'shared-portfolio');
+      await setDoc(sharedDoc, { snapshots: newSnapshots }, { merge: true });
+      setSnapshots(newSnapshots);
+      console.log("차트 데이터 보충 완료:", newSnapshots.length, "건");
+    } catch (e) {
+      console.error("차트 보충 실패:", e);
     }
   };
 
@@ -229,8 +304,8 @@ const App = () => {
       const targetUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${yfTickers.join(',')}`;
       // 다중 프록시 시도 (CORS 및 안정성 확보)
       const proxies = [
-        `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
         `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+        `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
         `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`
       ];
 
@@ -284,8 +359,8 @@ const App = () => {
       const fetchHistory = async (symbol) => {
         const chartUrl = `https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1y`;
         const historyProxies = [
-          `https://api.allorigins.win/get?url=${encodeURIComponent(chartUrl)}`,
           `https://corsproxy.io/?${encodeURIComponent(chartUrl)}`,
+          `https://api.allorigins.win/get?url=${encodeURIComponent(chartUrl)}`,
           `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(chartUrl)}`
         ];
 
@@ -318,7 +393,10 @@ const App = () => {
         finalPricesFromHistory[symbol] = chart.meta.regularMarketPrice || closePrices[closePrices.length - 1] || 0;
 
         timestamps.forEach((ts, tIdx) => {
-          const date = new Date(ts * 1000).toISOString().split('T')[0];
+          // UTC 대신 현지 날짜 기준으로 변환 (날짜 어긋남 방지)
+          const dObj = new Date(ts * 1000);
+          const date = `${dObj.getFullYear()}-${String(dObj.getMonth() + 1).padStart(2, '0')}-${String(dObj.getDate()).padStart(2, '0')}`;
+
           const cPrice = closePrices[tIdx];
           const oPrice = openPrices[tIdx];
           if (cPrice !== undefined && cPrice !== null) {
@@ -366,6 +444,11 @@ const App = () => {
       }
 
       setHistory(sortedHistory);
+
+      // 만약 저장된 스냅샷(캐시)이 부족하면 야후 파이낸스 데이터로 보충합니다.
+      if (isAdmin && snapshots.length <= 5) {
+        backfillSnapshots(sortedHistory);
+      }
 
     } catch (e) {
       console.error("데이터 로드 중 치명적 오류:", e);
@@ -543,7 +626,20 @@ const App = () => {
   const stats = useMemo(() => {
     let total = 0; let cost = 0;
     displayAssets.forEach(a => {
-      const p = prices[a.symbol] || a.buyPrice || 0;
+      const sym = a.symbol.toUpperCase();
+      // 실시간 시세(prices) 우선 -> 시세 누락 시 마지막 히스토리 가격(history) -> 그것도 없으면 매수가
+      let currentPrice = prices[sym];
+      if (!currentPrice || currentPrice === 0) {
+        if (history && history.length > 0) {
+          for (let i = history.length - 1; i >= 0; i--) {
+            if (history[i][sym] > 0) {
+              currentPrice = history[i][sym];
+              break;
+            }
+          }
+        }
+      }
+      const p = currentPrice || a.buyPrice || 0;
       total += a.quantity * p;
       cost += a.quantity * a.buyPrice;
     });
@@ -580,7 +676,8 @@ const App = () => {
       let pastValue = 0;
       assets.forEach(a => {
         const sym = a.symbol.toUpperCase();
-        pastValue += a.quantity * (pastData[sym] || prices[sym] || a.buyPrice);
+        // 과거 가치 계산 시 오늘 가격(prices)을 사용하던 오류 수정
+        pastValue += a.quantity * (pastData[sym] || a.buyPrice || 0);
       });
       const change = total - pastValue;
       const percent = pastValue > 0 ? (change / pastValue) * 100 : 0;
@@ -602,34 +699,98 @@ const App = () => {
   }, [stats.total, isAdmin, loading, snapshots]);
 
   const chartData = useMemo(() => {
-    // 실제 기록된 스냅샷이 2개 이상이면 실제 데이터를 우선 사용합니다.
-    if (snapshots && snapshots.length >= 2) {
-      return snapshots.map(s => ({
-        date: typeof s.date === 'string' ? s.date.slice(5) : '',
-        value: s.value || 0
-      }));
+    if (!history || history.length === 0) return [];
+
+    // 날짜 정규화 함수 (YYYY-MM-DD 10자리로 통일)
+    const normalizeDate = (d) => {
+      if (!d || typeof d !== 'string') return null;
+      const parts = d.split('-');
+      if (parts.length !== 3) return d.trim();
+      const y = parts[0];
+      const m = parts[1].padStart(2, '0').slice(-2);
+      const day = parts[2].padStart(2, '0').slice(-2);
+      return `${y}-${m}-${day}`;
+    };
+
+    const combinedMap = new Map();
+    const lastKnownPrices = {};
+
+    // 1. 히스토리 기반 데이터 생성 (정렬 보장)
+    const sortedRawHistory = [...history]
+      .filter(h => h.date)
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    sortedRawHistory.forEach(day => {
+      const normDate = normalizeDate(day.date);
+      if (!normDate) return;
+
+      let totalValue = 0;
+      let hasPriceUpdateThisDay = false;
+
+      assets.forEach(asset => {
+        const sym = asset.symbol.toUpperCase();
+        // 해당 날짜에 실제 데이터가 존재하는지 확인
+        if (day[sym] !== undefined && day[sym] !== null && day[sym] > 0) {
+          lastKnownPrices[sym] = day[sym];
+          // 특정 자산이라도 새로운 가격 정보가 있으면 거래가 발생한 날로 간주
+          hasPriceUpdateThisDay = true;
+        }
+
+        // 중요: 과거 가치 계산 시 실시간 시세(prices[sym])를 절대 섞지 않음.
+        // 현재까지 알려진 역사적 가격(lastKnown) -> 없으면 매수가(buyPrice) 순으로 적용.
+        const price = lastKnownPrices[sym] || asset.buyPrice || 0;
+        totalValue += (asset.quantity || 0) * price;
+      });
+
+      // 주말(토, 일)은 무조건 제외
+      const dateObj = new Date(day.date);
+      const dayOfWeek = dateObj.getDay(); // 0: 일요일, 6: 토요일
+      const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+      // 주말이 아니고, 최소한 하나 이상의 자산에 가격 업데이트가 있었던 날만 차트에 표시 (공휴일 필터링)
+      if (!isWeekend && hasPriceUpdateThisDay && totalValue > 0) {
+        combinedMap.set(normDate, totalValue);
+      }
+    });
+
+    // 2. 관리자 스냅샷 병합 (정밀 실시간 기록 데이터)
+    if (snapshots && snapshots.length > 0) {
+      snapshots.forEach(s => {
+        const normDate = normalizeDate(s.date);
+        const dayOfWeek = new Date(s.date).getDay();
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+        if (normDate && s.value > 0 && !isWeekend) {
+          // 신뢰도 검사: 이미 동일 날짜에 히스토리 기반 데이터가 있다면 비교
+          const historyValue = combinedMap.get(normDate);
+          if (historyValue) {
+            // 저장된 스냅샷이 히스토리 계산값보다 너무 낮으면(30% 이상 차이) 
+            // 이는 데이터 누락 시점에 잘못 저장된 "오염된 데이터"로 간주하고 무시함
+            if (s.value < historyValue * 0.7) {
+              console.warn(`[Chart] ${normDate}의 스냅샷 데이터 오염 감지(급락), 무시하고 히스토리 값을 사용합니다.`);
+              return;
+            }
+          }
+          combinedMap.set(normDate, s.value);
+        }
+      });
     }
 
-    // 스냅샷이 없으면 시장 히스토리 데이터를 가공해서 보여줍니다.
-    if (!history || !history.length) return [];
+    if (combinedMap.size === 0) return [];
 
-    let filteredHistory = history;
-    if (chartRange === '7d') filteredHistory = history.slice(-7);
-    else if (chartRange === '30d') filteredHistory = history.slice(-30);
+    // 3. 전체 날짜 재정렬 및 기간 필터링
+    const finalSortedDates = Array.from(combinedMap.keys()).sort();
+    let targetDates = finalSortedDates;
+    if (chartRange === '7d') targetDates = finalSortedDates.slice(-7);
+    else if (chartRange === '30d') targetDates = finalSortedDates.slice(-30);
+    else if (chartRange === '1y') targetDates = finalSortedDates.slice(-365);
 
-    return filteredHistory.map(d => {
-      let v = 0;
-      assets.forEach(a => {
-        const symbol = a.symbol.toUpperCase();
-        const price = d[symbol] || prices[symbol] || a.buyPrice || 0;
-        v += (a.quantity || 0) * price;
-      });
-      return {
-        date: typeof d.date === 'string' ? d.date.slice(5) : '',
-        value: isNaN(v) ? 0 : v
-      };
-    }).filter(d => d.date); // 유효한 날짜가 있는 데이터만 표시
-  }, [snapshots, history, assets, prices]);
+    return targetDates.map(date => ({
+      fullDate: date,
+      date: date.slice(5),
+      value: Math.round(combinedMap.get(date))
+    }));
+  }, [snapshots, history, assets, prices, chartRange]);
 
 
   if (authLoading) {
@@ -676,15 +837,26 @@ const App = () => {
             </button>
 
             {isAdmin && (
-              <button
-                onClick={resetTodayData}
-                disabled={loading}
-                className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 h-10 px-4 rounded-xl transition-all flex items-center justify-center gap-2 text-xs font-bold"
-                title="오늘 데이터 초기화"
-              >
-                <Trash2 size={14} />
-                <span className="hidden md:inline">초기화</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={resetTodayData}
+                  disabled={loading}
+                  className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 h-10 px-4 rounded-xl transition-all flex items-center justify-center gap-2 text-xs font-bold"
+                  title="오늘 데이터 초기화"
+                >
+                  <Trash2 size={14} />
+                  <span className="hidden md:inline">오늘 리셋</span>
+                </button>
+                <button
+                  onClick={resetAllSnapshots}
+                  disabled={loading}
+                  className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 h-10 px-4 rounded-xl transition-all flex items-center justify-center gap-2 text-xs font-bold"
+                  title="차트 히스토리 전체 초기화"
+                >
+                  <ChartIcon size={14} />
+                  <span className="hidden md:inline">차트 리셋</span>
+                </button>
+              </div>
             )}
 
             {user ? (
@@ -805,17 +977,24 @@ const App = () => {
                     </div>
                   </div>
 
-                  <div className="flex-1 w-full min-h-[160px]">
+                  <div className="flex-1 w-full min-h-[200px] md:min-h-[220px] h-[220px]">
                     <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={chartData}>
+                      <AreaChart data={chartData} margin={{ top: 30, right: 10, left: 10, bottom: 60 }}>
                         <defs>
                           <linearGradient id="colorNetWorth" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="5%" stopColor="#6366f1" stopOpacity={0.4} />
                             <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
                           </linearGradient>
                         </defs>
-                        <XAxis dataKey="date" hide />
-                        <YAxis hide domain={['auto', 'auto']} />
+                        <XAxis dataKey="fullDate" hide />
+                        <YAxis
+                          hide
+                          domain={([dataMin, dataMax]) => {
+                            const range = dataMax - dataMin;
+                            if (range === 0) return [dataMin * 0.9, dataMax * 1.1];
+                            return [dataMin - (range * 0.4), dataMax + (range * 0.3)];
+                          }}
+                        />
                         <Area
                           type="monotone"
                           dataKey="value"
@@ -823,7 +1002,8 @@ const App = () => {
                           strokeWidth={4}
                           fillOpacity={1}
                           fill="url(#colorNetWorth)"
-                          animationDuration={2000}
+                          connectNulls={true}
+                          animationDuration={500}
                           strokeLinecap="round"
                         />
                         <Tooltip
@@ -831,7 +1011,9 @@ const App = () => {
                             if (active && payload && payload.length) {
                               return (
                                 <div className="glass-card p-5 border-white/10 shadow-2xl backdrop-blur-3xl ring-1 ring-white/10 bg-black/40">
-                                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 border-b border-white/5 pb-2">{payload[0].payload.date}</p>
+                                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 border-b border-white/5 pb-2">
+                                    {payload[0].payload.fullDate || payload[0].payload.date}
+                                  </p>
                                   <p className="text-xl font-black text-white tracking-tighter">${payload[0].value.toLocaleString()}</p>
                                 </div>
                               );
