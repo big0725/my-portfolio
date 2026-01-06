@@ -592,9 +592,16 @@ const App = () => {
 
     setIsAiLoading(true);
     try {
-      const portfolioSummary = assets.map(a => `${a.symbol}: ${a.quantity}주 (보유단가: $${a.buyPrice || 'unknown'})`).join(', ');
+      // 실시간 시세 및 수익률 정보를 포함하여 AI가 현재 시장 상황을 인지하게 함
+      const portfolioSummary = assets.map(a => {
+        const sym = a.symbol.toUpperCase();
+        const currentPrice = prices[sym] || 'loading...';
+        const change = stats.dailyChangePercent || 0;
+        return `${a.symbol}: ${a.quantity}주 (보유단가: $${a.buyPrice || 'unknown'}, 현재가: $${currentPrice})`;
+      }).join(', ');
 
-      // v1beta 및 gemini-2.0-flash 사용 (사용자 요청에 따라 최신 모델로 업데이트)
+      const marketContext = `전체 포트폴리오 하루 변동률: ${stats.dailyChangePercent.toFixed(2)}%, 총 자산가치: $${Math.round(stats.total)}`;
+
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(currentApiKey)}`;
 
       const response = await fetch(url, {
@@ -603,9 +610,17 @@ const App = () => {
         body: JSON.stringify({
           contents: [{
             parts: [{
-              text: `다음 자산 목록을 바탕으로 거장 3인(워렌 버핏, 스탠리 드러켄밀러, 캐시 우드)의 스타일로 투자 조언을 생성하세요: [${portfolioSummary}].
+              text: `다음 자산 목록과 현재 시장 상황을 바탕으로 거장 3인(톰 리, 스탠리 드러켄밀러, 마크 미너비니)의 스타일로 '스윙 투자(1주일~1개월)' 관점의 실시간 조언을 생성하세요.
+              
+              시장 상황: [${marketContext}]
+              자산 목록: [${portfolioSummary}]
+              
+              - 톰 리: 현재의 지수 흐름과 매크로 강세장 여부, 섹터 로테이션 관점
+              - 스탠리 드러켄밀러: 시장의 변곡점 포착, 자산 배분 비중 조절 및 꼬리 위험 관리
+              - 마크 미너비니: 현재 주가의 위치(기술적 단계), VCP 돌파 여부, 구체적인 익절/손절 관점
+              
               결과는 반드시 순수 JSON이어야 하며, 다른 말은 하지 마세요.
-              구조: {"buffett": {"advice": "...", "action": "...", "pick": {"symbol": "...", "reason": "..."}}, "druckenmiller": ..., "cathie": ...}`
+              구조: {"tom": {"advice": "...", "action": "...", "pick": {"symbol": "...", "reason": "..."}}, "druckenmiller": ..., "minervini": ...}`
             }]
           }]
         })
@@ -630,9 +645,9 @@ const App = () => {
 
       // 키 매핑 (유연한 키 지원)
       const mappedContent = {
-        buffett: content.buffett || content.warren_buffett || content.Buffett || {},
+        tom: content.tom || content.tom_lee || content.Tom || {},
         druckenmiller: content.druckenmiller || content.stanley_druckenmiller || content.Druckenmiller || {},
-        cathie: content.cathie || content.cathie_wood || content.Cathie || {}
+        minervini: content.minervini || content.mark_minervini || content.Minervini || {}
       };
 
       setAiInsights(mappedContent);
@@ -1217,12 +1232,12 @@ const App = () => {
                   <div className="relative flex-1 min-h-[450px] md:min-h-[500px]">
                     {[
                       {
-                        name: "WARREN BUFFETT",
-                        role: "VALUE LEGEND",
-                        data: aiInsights?.buffett,
-                        color: "amber",
-                        image: "/buffett.png",
-                        icon: <TrendingUp size={16} className="text-amber-400" />
+                        name: "TOM LEE",
+                        role: "MACRO BULL",
+                        data: aiInsights?.tom,
+                        color: "emerald",
+                        image: "/tom_lee_animated.png",
+                        icon: <TrendingUp size={16} className="text-emerald-400" />
                       },
                       {
                         name: "S. DRUCKENMILLER",
@@ -1233,12 +1248,12 @@ const App = () => {
                         icon: <BrainCircuit size={16} className="text-blue-400" />
                       },
                       {
-                        name: "CATHIE WOOD",
-                        role: "INNOVATION ICON",
-                        data: aiInsights?.cathie,
-                        color: "fuchsia",
-                        image: "/cathie.png",
-                        icon: <Sparkles size={16} className="text-fuchsia-400" />
+                        name: "M. MINERVINI",
+                        role: "MOMENTUM MASTER",
+                        data: aiInsights?.minervini,
+                        color: "orange",
+                        image: "/mark_minervini_animated.png",
+                        icon: <Sparkles size={16} className="text-orange-400" />
                       }
                     ].map((guru, i) => (
                       <div
